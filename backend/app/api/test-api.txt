@@ -1,0 +1,84 @@
+# curl file to test the created API's
+
+BASE=http://127.0.0.1:8000
+
+# ---------- 1. FIRM ----------
+curl -s -X POST $BASE/firms/ -H "Content-Type: application/json" \
+  -d '{"name": "Acme Legal LLP", "contact_email": "billing@acmelegal.com", "status": "active"}'
+
+curl -s $BASE/firms/
+curl -s $BASE/firms/1
+curl -s -X PATCH $BASE/firms/1 -H "Content-Type: application/json" -d '{"status": "inactive"}'
+
+# ---------- 2. USER ----------
+curl -s -X POST $BASE/users/ -H "Content-Type: application/json" \
+  -d '{"name": "Jane Doe", "email": "jane@acmelegal.com", "role": "admin", "firm_id": 1, "password": "S3cret!23"}'
+
+curl -s $BASE/users/
+curl -s "$BASE/users/?firm_id=1"
+curl -s $BASE/users/1
+
+# ---------- 3. MATTER ----------
+curl -s -X POST $BASE/matters/ -H "Content-Type: application/json" \
+  -d '{"firm_id": 1, "name": "Merger Review - Q3", "owner": "Jane Doe", "status": "open"}'
+
+curl -s "$BASE/matters/?firm_id=1"
+curl -s $BASE/matters/1
+curl -s -X PATCH $BASE/matters/1 -H "Content-Type: application/json" -d '{"status": "closed"}'
+
+# ---------- 4. BUDGET ----------
+curl -s -X POST $BASE/budgets/ -H "Content-Type: application/json" \
+  -d '{"matter_id": 1, "allocated_amt": 50000.0, "threshold_pct": 80}'
+
+# duplicate budget on same matter should fail with 400
+curl -s -X POST $BASE/budgets/ -H "Content-Type: application/json" \
+  -d '{"matter_id": 1, "allocated_amt": 10000.0}'
+
+curl -s $BASE/budgets/1
+
+# ---------- 5. INVOICE ----------
+curl -s -X POST $BASE/invoices/ -H "Content-Type: application/json" \
+  -d '{"matter_id": 1, "invoice_no": "INV-1001", "invoice_date": "2026-07-01", "total_amount": 4200.5, "status": "submitted", "confidence_score": 0.97}'
+
+curl -s "$BASE/invoices/?matter_id=1"
+curl -s -X PATCH $BASE/invoices/1 -H "Content-Type: application/json" -d '{"status": "approved"}'
+
+# ---------- 6. LINE ITEM ----------
+curl -s -X POST $BASE/line-items/ -H "Content-Type: application/json" \
+  -d '{"invoice_id": 1, "timekeeper": "J. Smith", "hours": 6.5, "rate": 350, "amount": 2275}'
+
+curl -s "$BASE/line-items/?invoice_id=1"
+
+# ---------- 7. BUDGET LEDGER ----------
+curl -s -X POST $BASE/budget-ledger/ -H "Content-Type: application/json" \
+  -d '{"budget_id": 1, "invoice_id": 1, "amount": 4200.5, "entry_type": "invoice_approved"}'
+
+curl -s "$BASE/budget-ledger/?budget_id=1"
+
+# ---------- 8. ALERT ----------
+curl -s -X POST $BASE/alerts/ -H "Content-Type: application/json" \
+  -d '{"budget_id": 1, "type": "threshold_warning", "message": "Budget usage crossed 80% threshold"}'
+
+curl -s "$BASE/alerts/?budget_id=1"
+
+# ---------- 9. AUDIT LOG ----------
+curl -s -X POST $BASE/audit-logs/ -H "Content-Type: application/json" \
+  -d '{"invoice_id": 1, "user_id": 1, "action": "invoice_created", "notes": "Created via API"}'
+
+curl -s "$BASE/audit-logs/?invoice_id=1"
+
+# ---------- error-path checks ----------
+curl -s -o /dev/null -w "%{http_code}\n" $BASE/firms/999          # expect 404
+curl -s -X POST $BASE/matters/ -H "Content-Type: application/json" \
+  -d '{"firm_id": 999, "name": "Bad Ref", "owner": "X"}'           # expect 400 (bad firm_id)
+
+# ---------- cleanup (delete) ----------
+curl -s -o /dev/null -w "%{http_code}\n" -X DELETE $BASE/audit-logs/1  # 204
+curl -s -o /dev/null -w "%{http_code}\n" -X DELETE $BASE/alerts/1     # 204
+curl -s -o /dev/null -w "%{http_code}\n" -X DELETE $BASE/budget-ledger/1  # 204
+curl -s -o /dev/null -w "%{http_code}\n" -X DELETE $BASE/line-items/1    # 204
+
+# ---------- CORS preflight check ----------
+curl -s -i -X OPTIONS $BASE/firms/ \
+  -H "Origin: http://localhost:3000" \
+  -H "Access-Control-Request-Method: POST" | grep -i "access-control"

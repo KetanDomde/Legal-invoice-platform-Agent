@@ -1,28 +1,36 @@
-from sqlalchemy import Column, Integer, String, ForeignKey
-from sqlalchemy.orm import relationship
+from typing import List, Optional
 
-from app.database.database import Base
+from sqlmodel import Field, Relationship, SQLModel
 
 
-class User(Base):
-    __tablename__ = "users"
+class UserBase(SQLModel):
+    name: str
+    email: str = Field(unique=True, index=True)
+    role: str = "viewer"  # admin | editor | viewer
+    firm_id: Optional[int] = Field(default=None, foreign_key="firm.firm_id")
 
-    user_id = Column(Integer, primary_key=True, index=True)
 
-    name = Column(String, nullable=False)
+class User(UserBase, table=True):
+    __tablename__ = "user"
 
-    email = Column(String, unique=True, nullable=False, index=True)
+    user_id: Optional[int] = Field(default=None, primary_key=True)
+    password_hash: str
 
-    password_hash = Column(String, nullable=False)
+    firm: Optional["Firm"] = Relationship(back_populates="users")
+    audit_logs: List["AuditLog"] = Relationship(back_populates="user")
 
-    role = Column(String, nullable=False)
 
-    firm_id = Column(Integer, ForeignKey("firms.firm_id"), nullable=True)
+class UserCreate(UserBase):
+    password: str  # plaintext in, hashed before storage — never returned
 
-    # Relationships
-    firm = relationship("Firm", back_populates="users")
 
-    audit_logs = relationship(
-        "AuditLog",
-        back_populates="user"
-    )
+class UserUpdate(SQLModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    role: Optional[str] = None
+    firm_id: Optional[int] = None
+    password: Optional[str] = None
+
+
+class UserRead(UserBase):
+    user_id: int

@@ -1,59 +1,37 @@
-from sqlalchemy import (
-    Column,
-    Integer,
-    String,
-    ForeignKey,
-    Text
-)
+from datetime import datetime, timezone
+from typing import Optional
 
-from sqlalchemy.orm import relationship
-
-from app.database.database import Base
+from sqlmodel import Field, Relationship, SQLModel
 
 
-class AuditLog(Base):
-    __tablename__ = "audit_logs"
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
-    log_id = Column(
-        Integer,
-        primary_key=True,
-        index=True
-    )
 
-    invoice_id = Column(
-        Integer,
-        ForeignKey("invoices.invoice_id"),
-        nullable=True
-    )
+class AuditLogBase(SQLModel):
+    invoice_id: Optional[int] = Field(default=None, foreign_key="invoice.invoice_id")
+    user_id: Optional[int] = Field(default=None, foreign_key="user.user_id")
+    action: str
+    notes: Optional[str] = None
+    timestamp: str = Field(default_factory=_now_iso)
 
-    user_id = Column(
-        Integer,
-        ForeignKey("users.user_id"),
-        nullable=True
-    )
 
-    action = Column(
-        String,
-        nullable=False
-    )
+class AuditLog(AuditLogBase, table=True):
+    __tablename__ = "audit_log"
 
-    notes = Column(
-        Text,
-        nullable=True
-    )
+    log_id: Optional[int] = Field(default=None, primary_key=True)
 
-    timestamp = Column(
-        String,
-        nullable=False
-    )
+    invoice: Optional["Invoice"] = Relationship(back_populates="audit_logs")
+    user: Optional["User"] = Relationship(back_populates="audit_logs")
 
-    # Relationships
-    invoice = relationship(
-        "Invoice",
-        back_populates="audit_logs"
-    )
 
-    user = relationship(
-        "User",
-        back_populates="audit_logs"
-    )
+class AuditLogCreate(SQLModel):
+    invoice_id: Optional[int] = None
+    user_id: Optional[int] = None
+    action: str
+    notes: Optional[str] = None
+    timestamp: Optional[str] = None
+
+
+class AuditLogRead(AuditLogBase):
+    log_id: int

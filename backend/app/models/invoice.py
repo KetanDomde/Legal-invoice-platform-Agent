@@ -1,10 +1,14 @@
 from sqlalchemy import (
     Column,
     Integer,
-    Float,
     String,
-    ForeignKey
+    Numeric,
+    Float,
+    Boolean,
+    Date,
+    ForeignKey,
 )
+
 
 from sqlalchemy.orm import relationship
 
@@ -71,4 +75,25 @@ class Invoice(Base):
     audit_logs = relationship(
         "AuditLog",
         back_populates="invoice"
+    )
+    
+    budget_valid = Column(
+    Boolean,
+    nullable=True,
+    )
+
+    duplicate_flag = Column(
+    Boolean,
+    nullable=False,
+    default=False,
+    )
+
+    validation_status = Column(
+    String,
+    nullable=True,
+    )
+
+    validation_message = Column(
+    String,
+    nullable=True,
     )

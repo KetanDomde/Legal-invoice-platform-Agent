@@ -1,17 +1,25 @@
-# app/core/config.py
-import os
-from pydantic_settings import BaseSettings
+from pathlib import Path
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # backend/
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+BASE_DIR = Path(__file__).resolve().parents[1]
+
 
 class Settings(BaseSettings):
-    DATABASE_URL: str = f"sqlite:///{os.path.join(BASE_DIR, 'legal_invoice.db')}"
-    JWT_SECRET: str
-    ALGORITHM: str
-    ACCESS_TOKEN_EXPIRE_MINUTES: int
-    GROQ_API_KEY: str
+    database_url: str = f"sqlite:///{BASE_DIR / 'legal_invoice.db'}"
+    jwt_secret: str = "change-me"
+    algorithm: str = "HS256"
+    access_token_expire_minutes: int = 60
+    groq_api_key: str = ""
+    groq_model: str = "llama-3.1-8b-instant"
 
-    class Config:
-        env_file = ".env"
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        populate_by_name=True,
+    )
+
 
 settings = Settings()

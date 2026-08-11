@@ -1,15 +1,6 @@
 from app.database.database import Base, engine
+from app.models import entities  # noqa: F401
 
-# Import all models
-from app.models import (
-    Firm,
-    User,
-    Matter,
-    Budget,
-    Invoice,
-    AuditLog,
-)
 
-Base.metadata.create_all(bind=engine)
-
-print("Database tables created successfully.")
+def init_db() -> None:
+    Base.metadata.create_all(bind=engine)

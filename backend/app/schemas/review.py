@@ -1,40 +1,23 @@
-from datetime import datetime
-from pydantic import BaseModel
 from datetime import date
-from decimal import Decimal
+from pydantic import BaseModel, Field
 
 
 class ReviewInvoiceResponse(BaseModel):
-
     invoice_id: int
-
     matter_id: int
-
     firm_id: int
-
-    invoice_no: str | None = None
-
-    invoice_date: date | None = None
-
-    total_amount: Decimal | None = None
-
+    invoice_no: str
+    invoice_date: date | None
+    total_amount: float
     status: str
+    confidence_score: float | None
+    budget_valid: bool | None
+    duplicate_flag: bool
+    validation_status: str | None
+    validation_message: str | None
+    review_reasons: list[str] = Field(default_factory=list)
 
-    confidence_score: float | None = None
-
-    budget_valid: bool | None = None
-
-    duplicate_flag: bool = False
-
-    validation_status: str | None = None
-
-    validation_message: str | None = None
-
-    review_reasons: list[str] = []
-    
-    
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 
 class ApproveRequest(BaseModel):
@@ -42,8 +25,8 @@ class ApproveRequest(BaseModel):
 
 
 class RejectRequest(BaseModel):
-    reason: str
+    reason: str = Field(min_length=1)
 
 
 class ClarificationRequest(BaseModel):
-    note: str
+    reason: str = Field(min_length=1)

@@ -1,0 +1,327 @@
+from __future__ import annotations
+
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
+from app.models import Alert, AuditLog, Budget, BudgetLedger, Invoice
+from app.models import User
+
+
+CONFIDENCE_THRESHOLD = 0.85
+AUTO_APPROVE = "auto_approve"
+HUMAN_REVIEW = "human_review"
+
+
+def add_audit_log(
+    db: Session,
+    *,
+    action: str,
+    user_id: int | None = None,
+    invoice_id: int | None = None,
+    notes: str | None = None,
+) -> AuditLog:
+    log = AuditLog(
+        action=action,
+        user_id=user_id,
+        invoice_id=invoice_id,
+        notes=notes,
+    )
+    db.add(log)
+    return log
+
+
+def get_budget_summary(db: Session, matter_id: int) -> dict:
+    budget = db.query(Budget).filter(Budget.matter_id == matter_id).first()
+    if budget is None:
+        raise ValueError(f"No budget found for matter_id={matter_id}")
+
+    utilized = (
+        db.query(func.coalesce(func.sum(Invoice.total_amount), 0))
+        .filter(
+            Invoice.matter_id == matter_id,
+            Invoice.status == "approved",
+        )
+        .scalar()
+    )
+    utilized = float(utilized or 0)
+    total = float(budget.allocated_amt)
+    remaining = total - utilized
+    pct_used = (utilized / total * 100) if total else 100.0
+
+    return {
+        "budget": budget,
+        "utilized": utilized,
+        "allocated": total,
+        "remaining": remaining,
+        "pct_used": pct_used,
+        "threshold_pct": float(budget.threshold_pct),
+    }
+
+
+def find_duplicate_invoice(
+    db: Session,
+    *,
+    firm_id: int,
+    invoice_no: str,
+    total_amount: float,
+    exclude_invoice_id: int | None = None,
+) -> Invoice | None:
+    query = db.query(Invoice).filter(
+        Invoice.firm_id == firm_id,
+        Invoice.invoice_no == invoice_no,
+        Invoice.total_amount == total_amount,
+    )
+    if exclude_invoice_id is not None:
+        query = query.filter(Invoice.invoice_id != exclude_invoice_id)
+    return query.first()
+
+
+def validate_invoice(
+    db: Session,
+    invoice: Invoice,
+    confidence_score: float | None = None,
+) -> dict:
+    confidence = invoice.confidence_score if confidence_score is None else confidence_score
+    budget = get_budget_summary(db, invoice.matter_id)
+    duplicate = find_duplicate_invoice(
+        db,
+        firm_id=invoice.firm_id,
+        invoice_no=invoice.invoice_no,
+        total_amount=float(invoice.total_amount),
+        exclude_invoice_id=invoice.invoice_id,
+    )
+
+    budget_ok = float(invoice.total_amount) <= budget["remaining"]
+    duplicate_flag = duplicate is not None
+
+    reasons: list[str] = []
+    if not budget_ok:
+        reasons.append(
+            f"Invoice amount {float(invoice.total_amount):.2f} exceeds "
+            f"remaining budget {budget['remaining']:.2f}."
+        )
+    if duplicate_flag:
+        reasons.append(
+            f"Duplicate invoice detected: invoice_no '{invoice.invoice_no}' "
+            f"already exists as invoice_id={duplicate.invoice_id}."
+        )
+    if confidence is not None and confidence < CONFIDENCE_THRESHOLD:
+        reasons.append(
+            f"Extraction confidence {confidence:.2f} is below "
+            f"threshold {CONFIDENCE_THRESHOLD:.2f}."
+        )
+
+    validation_passed = budget_ok and not duplicate_flag
+    decision = (
+        AUTO_APPROVE
+        if validation_passed and confidence is not None and confidence >= CONFIDENCE_THRESHOLD
+        else HUMAN_REVIEW
+    )
+
+    if not reasons and decision == AUTO_APPROVE:
+        reasons.append("All validation checks passed.")
+    elif not reasons:
+        reasons.append("Invoice requires manual review.")
+
+    return {
+        "validation_passed": validation_passed,
+        "budget_ok": budget_ok,
+        "remaining_budget": budget["remaining"],
+        "duplicate": duplicate_flag,
+        "duplicate_invoice_id": duplicate.invoice_id if duplicate else None,
+        "confidence_score": confidence,
+        "confidence_threshold": CONFIDENCE_THRESHOLD,
+        "decision": decision,
+        "reasons": reasons,
+    }
+
+
+def validate_and_route_invoice(
+    db: Session,
+    invoice: Invoice,
+    confidence_score: float | None = None,
+) -> dict:
+    result = validate_invoice(db, invoice, confidence_score)
+
+    invoice.confidence_score = result["confidence_score"]
+    invoice.budget_valid = result["budget_ok"]
+    invoice.duplicate_flag = result["duplicate"]
+    invoice.validation_status = "passed" if result["validation_passed"] else "failed"
+    invoice.validation_message = "; ".join(result["reasons"])
+    invoice.status = "approved" if result["decision"] == AUTO_APPROVE else "pending_review"
+
+    add_audit_log(
+        db,
+        action="auto_approved" if result["decision"] == AUTO_APPROVE else "validated",
+        invoice_id=invoice.invoice_id,
+        notes=invoice.validation_message,
+    )
+    db.commit()
+    db.refresh(invoice)
+    return result
+
+
+def _post_budget_entry(db: Session, invoice: Invoice) -> None:
+    budget = db.query(Budget).filter(Budget.matter_id == invoice.matter_id).first()
+    if budget is None:
+        raise ValueError("No budget found for this matter.")
+
+    already_posted = (
+        db.query(BudgetLedger)
+        .filter(
+            BudgetLedger.invoice_id == invoice.invoice_id,
+            BudgetLedger.entry_type == "invoice_approved",
+        )
+        .first()
+    )
+    if already_posted:
+        return
+
+    db.add(
+        BudgetLedger(
+            budget_id=budget.budget_id,
+            invoice_id=invoice.invoice_id,
+            amount=invoice.total_amount,
+            entry_type="invoice_approved",
+        )
+    )
+
+    summary = get_budget_summary(db, invoice.matter_id)
+    projected_pct = summary["pct_used"]
+    if projected_pct >= summary["threshold_pct"]:
+        db.add(
+            Alert(
+                budget_id=budget.budget_id,
+                type="budget_threshold",
+                message=(
+                    f"Matter {invoice.matter_id} will reach approximately "
+                    f"{projected_pct:.1f}% budget utilization after invoice "
+                    f"{invoice.invoice_id}."
+                ),
+            )
+        )
+
+
+def approve_invoice(db: Session, invoice: Invoice, user_id: int, notes: str | None = None) -> Invoice:
+    if invoice.status != "pending_review":
+        raise ValueError("Only invoices pending review can be approved.")
+
+    summary = get_budget_summary(db, invoice.matter_id)
+    if float(invoice.total_amount) > summary["remaining"]:
+        raise ValueError("Invoice amount exceeds remaining matter budget.")
+
+    old_status = invoice.status
+    invoice.status = "approved"
+    _post_budget_entry(db, invoice)
+
+    add_audit_log(
+        db,
+        action="approved",
+        user_id=user_id,
+        invoice_id=invoice.invoice_id,
+        notes=_status_note(old_status, invoice.status, notes),
+    )
+    db.commit()
+    db.refresh(invoice)
+    return invoice
+
+
+def reject_invoice(db: Session, invoice: Invoice, user_id: int, reason: str) -> Invoice:
+    if invoice.status != "pending_review":
+        raise ValueError("Only invoices pending review can be rejected.")
+    if not reason.strip():
+        raise ValueError("Rejection reason is required.")
+
+    old_status = invoice.status
+    invoice.status = "rejected"
+    add_audit_log(
+        db,
+        action="rejected",
+        user_id=user_id,
+        invoice_id=invoice.invoice_id,
+        notes=_status_note(old_status, invoice.status, reason),
+    )
+    db.commit()
+    db.refresh(invoice)
+    return invoice
+
+
+def request_clarification(db: Session, invoice: Invoice, user_id: int, reason: str) -> Invoice:
+    if invoice.status != "pending_review":
+        raise ValueError("Clarification can only be requested for invoices pending review.")
+    if not reason.strip():
+        raise ValueError("Clarification reason is required.")
+
+    old_status = invoice.status
+    invoice.status = "clarification_requested"
+    add_audit_log(
+        db,
+        action="clarification_requested",
+        user_id=user_id,
+        invoice_id=invoice.invoice_id,
+        notes=_status_note(old_status, invoice.status, reason),
+    )
+    db.commit()
+    db.refresh(invoice)
+    return invoice
+
+
+def get_review_reasons(invoice: Invoice) -> list[str]:
+    reasons: list[str] = []
+    if invoice.confidence_score is not None and invoice.confidence_score < CONFIDENCE_THRESHOLD:
+        reasons.append("Extraction confidence is below threshold.")
+    if invoice.budget_valid is False:
+        reasons.append("Invoice failed budget validation.")
+    if invoice.duplicate_flag:
+        reasons.append("Possible duplicate invoice detected.")
+    if not reasons:
+        reasons.append("Invoice requires manual review.")
+    return reasons
+
+
+def get_review_queue(db: Session, firm_id: int) -> list[dict]:
+    invoices = (
+        db.query(Invoice)
+        .filter(
+            Invoice.firm_id == firm_id,
+            Invoice.status.in_([HUMAN_REVIEW.replace("human_review", "pending_review"), "clarification_requested"]),
+        )
+        .order_by(Invoice.invoice_date.asc().nulls_last(), Invoice.invoice_id.asc())
+        .all()
+    )
+    return [
+        {
+            "invoice_id": invoice.invoice_id,
+            "matter_id": invoice.matter_id,
+            "firm_id": invoice.firm_id,
+            "invoice_no": invoice.invoice_no,
+            "invoice_date": invoice.invoice_date,
+            "total_amount": float(invoice.total_amount),
+            "status": invoice.status,
+            "confidence_score": invoice.confidence_score,
+            "budget_valid": invoice.budget_valid,
+            "duplicate_flag": invoice.duplicate_flag,
+            "validation_status": invoice.validation_status,
+            "validation_message": invoice.validation_message,
+            "review_reasons": get_review_reasons(invoice),
+        }
+        for invoice in invoices
+    ]
+
+
+def get_invoice_for_review(db: Session, invoice_id: int, firm_id: int) -> Invoice:
+    invoice = (
+        db.query(Invoice)
+        .filter(Invoice.invoice_id == invoice_id, Invoice.firm_id == firm_id)
+        .first()
+    )
+    if invoice is None:
+        raise ValueError("Invoice not found.")
+    return invoice
+
+
+def _status_note(old_status: str, new_status: str, reason: str | None = None) -> str:
+    note = f"Status changed from '{old_status}' to '{new_status}'."
+    if reason:
+        note += f" Reason: {reason}"
+    return note

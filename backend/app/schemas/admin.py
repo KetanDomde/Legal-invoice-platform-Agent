@@ -1,22 +1,24 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
+
 
 class CreateUserRequest(BaseModel):
     name: str
     email: EmailStr
-    password: str
+    password: str = Field(min_length=8)
     role: str
     firm_id: int | None = None
+
 
 class ChangeRoleRequest(BaseModel):
     role: str
 
+
 class UserAdminResponse(BaseModel):
     user_id: int
     name: str
-    email: str
+    email: EmailStr
     role: str
     firm_id: int | None
     is_active: bool
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}

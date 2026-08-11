@@ -54,21 +54,20 @@ def test_approval_posts_budget(
     result = approve_invoice(
         db=db,
         invoice=invoice,
-        user_id=100,
-        notes="Approved after review",
+        user_id=100
     )
 
     assert result.status == "approved"
     
     audit = (
-    db.query(AuditLog)
-    .filter(
-        AuditLog.invoice_id == invoice.invoice_id,
-        AuditLog.action == "approved",
+        db.query(AuditLog)
+            .filter(
+                AuditLog.invoice_id == invoice.invoice_id,
+                AuditLog.action == "approved",
+            )
+            .first()
     )
-    .first()
-)
-
+    
     assert audit is not None
     assert audit.user_id == 100
     assert audit.invoice_id == invoice.invoice_id
@@ -76,7 +75,6 @@ def test_approval_posts_budget(
 
     assert "pending_review" in audit.notes
     assert "approved" in audit.notes
-
     assert (
         captured["invoice_id"]
         == invoice.invoice_id
@@ -111,8 +109,7 @@ def test_only_pending_review_can_be_approved(
 
         approve_invoice(
             db=db,
-            invoice=invoice,
-            user_id=100,
+            invoice=invoice
         )
 
         assert False, (

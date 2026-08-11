@@ -77,7 +77,7 @@ Create a `.env` file:
 
 ```env
 DATABASE_URL=sqlite:///./legal_invoice.db
-JWT_SECRET=change-me-in-development
+SECRET_KEY=change-me-in-development
 ALGORITHM=HS256
 ACCESS_TOKEN_EXPIRE_MINUTES=60
 GROQ_API_KEY=

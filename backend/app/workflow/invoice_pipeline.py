@@ -9,7 +9,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app.models import Invoice
-from app.services.invoice import validate_and_route_invoice, post_approved_invoice_to_budget
+from app.services.invoice import validate_and_route_invoice
 
 
 def extract_text(file_path: str) -> str:

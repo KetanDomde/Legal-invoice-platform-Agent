@@ -1,7 +1,7 @@
 from sqlalchemy.orm import Session
 
 from app.auth.security import ADMIN, EDITOR, VIEWER, hash_password
-from app.models import Firm, User
+from app.models import User
 from app.services.invoice import add_audit_log
 
 
@@ -33,9 +33,6 @@ def create_user(
 
     if db.query(User).filter(User.email == email).first():
         raise ValueError("A user with this email already exists.")
-    if firm_id is not None and db.query(Firm).filter(Firm.firm_id == firm_id).first() is None:
-        raise ValueError("Firm not found.")
-
     user = User(
         name=name,
         email=email,

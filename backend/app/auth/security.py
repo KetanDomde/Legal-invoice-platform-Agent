@@ -32,13 +32,13 @@ def verify_password(password: str, password_hash: str) -> bool:
 def create_access_token(data: dict) -> str:
     payload = dict(data)
     payload["exp"] = datetime.now(timezone.utc) + timedelta(
-        minutes=settings.access_token_expire_minutes
+        minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
     )
-    return jwt.encode(payload, settings.jwt_secret, algorithm=settings.algorithm)
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
 def decode_access_token(token: str) -> dict:
-    return jwt.decode(token, settings.jwt_secret, algorithms=[settings.algorithm])
+    return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
 
 
 def authenticate_user(db: Session, email: str, password: str):

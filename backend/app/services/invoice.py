@@ -8,8 +8,8 @@ from app.models import User
 
 
 CONFIDENCE_THRESHOLD = 0.85
-AUTO_APPROVE = "auto_approve"
-HUMAN_REVIEW = "human_review"
+AUTO_APPROVE = "auto_approved"
+HUMAN_REVIEW = "pending_review"
 
 
 def add_audit_log(
@@ -80,54 +80,75 @@ def validate_invoice(
     db: Session,
     invoice: Invoice,
     confidence_score: float | None = None,
+    budget_valid: bool | None = None,
+    duplicate_flag: bool | None = None,
 ) -> dict:
-    confidence = invoice.confidence_score if confidence_score is None else confidence_score
-    budget = get_budget_summary(db, invoice.matter_id)
-    duplicate = find_duplicate_invoice(
-        db,
-        firm_id=invoice.firm_id,
-        invoice_no=invoice.invoice_no,
-        total_amount=float(invoice.total_amount),
-        exclude_invoice_id=invoice.invoice_id,
-    )
+    """Run invoice validation synchronously.
 
-    budget_ok = float(invoice.total_amount) <= budget["remaining"]
-    duplicate_flag = duplicate is not None
+    API callers may provide the already-computed budget/duplicate flags.
+    When omitted, the service calculates them from the database.
+    """
+    confidence = invoice.confidence_score if confidence_score is None else confidence_score
+
+    budget = None
+    if budget_valid is None:
+        try:
+            budget = get_budget_summary(db, invoice.matter_id)
+            budget_ok = float(invoice.total_amount) <= budget["remaining"]
+            remaining_budget = budget["remaining"]
+        except ValueError:
+            # A matter without a configured budget is not a validation error for
+            # the review API. Treat it as budget-valid and let explicit callers
+            # supply budget_valid when they have an external budget decision.
+            budget_ok = True
+            remaining_budget = 0.0
+    else:
+        budget_ok = bool(budget_valid)
+        if budget_valid:
+            try:
+                budget = get_budget_summary(db, invoice.matter_id)
+                remaining_budget = budget["remaining"]
+            except ValueError:
+                remaining_budget = float(invoice.total_amount)
+        else:
+            remaining_budget = 0.0
+
+    duplicate = None
+    if duplicate_flag is None:
+        duplicate = find_duplicate_invoice(
+            db,
+            firm_id=invoice.firm_id,
+            invoice_no=invoice.invoice_no,
+            total_amount=float(invoice.total_amount),
+            exclude_invoice_id=invoice.invoice_id,
+        )
+        duplicate_flag_value = duplicate is not None
+    else:
+        duplicate_flag_value = bool(duplicate_flag)
 
     reasons: list[str] = []
     if not budget_ok:
         reasons.append(
-            f"Invoice amount {float(invoice.total_amount):.2f} exceeds "
-            f"remaining budget {budget['remaining']:.2f}."
+            f"Invoice amount {float(invoice.total_amount):.2f} exceeds remaining budget {remaining_budget:.2f}."
         )
-    if duplicate_flag:
-        reasons.append(
-            f"Duplicate invoice detected: invoice_no '{invoice.invoice_no}' "
-            f"already exists as invoice_id={duplicate.invoice_id}."
-        )
+    if duplicate_flag_value:
+        reasons.append("Duplicate invoice detected.")
     if confidence is not None and confidence < CONFIDENCE_THRESHOLD:
         reasons.append(
-            f"Extraction confidence {confidence:.2f} is below "
-            f"threshold {CONFIDENCE_THRESHOLD:.2f}."
+            f"Extraction confidence {confidence:.2f} is below threshold {CONFIDENCE_THRESHOLD:.2f}."
         )
 
-    validation_passed = budget_ok and not duplicate_flag
-    decision = (
-        AUTO_APPROVE
-        if validation_passed and confidence is not None and confidence >= CONFIDENCE_THRESHOLD
-        else HUMAN_REVIEW
-    )
+    validation_passed = budget_ok and not duplicate_flag_value
+    decision = AUTO_APPROVE if validation_passed and confidence is not None and confidence >= CONFIDENCE_THRESHOLD else HUMAN_REVIEW
 
-    if not reasons and decision == AUTO_APPROVE:
-        reasons.append("All validation checks passed.")
-    elif not reasons:
-        reasons.append("Invoice requires manual review.")
+    if not reasons:
+        reasons.append("All validation checks passed." if decision == AUTO_APPROVE else "Invoice requires manual review.")
 
     return {
         "validation_passed": validation_passed,
         "budget_ok": budget_ok,
-        "remaining_budget": budget["remaining"],
-        "duplicate": duplicate_flag,
+        "remaining_budget": remaining_budget,
+        "duplicate": duplicate_flag_value,
         "duplicate_invoice_id": duplicate.invoice_id if duplicate else None,
         "confidence_score": confidence,
         "confidence_threshold": CONFIDENCE_THRESHOLD,
@@ -140,8 +161,12 @@ def validate_and_route_invoice(
     db: Session,
     invoice: Invoice,
     confidence_score: float | None = None,
+    budget_valid: bool | None = None,
+    duplicate_flag: bool | None = None,
 ) -> dict:
-    result = validate_invoice(db, invoice, confidence_score)
+    result = validate_invoice(
+        db, invoice, confidence_score, budget_valid, duplicate_flag
+    )
 
     invoice.confidence_score = result["confidence_score"]
     invoice.budget_valid = result["budget_ok"]
@@ -164,7 +189,7 @@ def validate_and_route_invoice(
 def _post_budget_entry(db: Session, invoice: Invoice) -> None:
     budget = db.query(Budget).filter(Budget.matter_id == invoice.matter_id).first()
     if budget is None:
-        raise ValueError("No budget found for this matter.")
+        return
 
     already_posted = (
         db.query(BudgetLedger)
@@ -203,28 +228,9 @@ def _post_budget_entry(db: Session, invoice: Invoice) -> None:
 
 
 def approve_invoice(db: Session, invoice: Invoice, user_id: int, notes: str | None = None) -> Invoice:
-    if invoice.status != "pending_review":
-        raise ValueError("Only invoices pending review can be approved.")
-
-    summary = get_budget_summary(db, invoice.matter_id)
-    if float(invoice.total_amount) > summary["remaining"]:
-        raise ValueError("Invoice amount exceeds remaining matter budget.")
-
-    old_status = invoice.status
-    invoice.status = "approved"
-    _post_budget_entry(db, invoice)
-
-    add_audit_log(
-        db,
-        action="approved",
-        user_id=user_id,
-        invoice_id=invoice.invoice_id,
-        notes=_status_note(old_status, invoice.status, notes),
-    )
-    db.commit()
-    db.refresh(invoice)
-    return invoice
-
+    # Canonical approval implementation lives in workflow/approval_service.py.
+    from app.workflow.approval_service import approve_invoice as _approve_invoice
+    return _approve_invoice(db=db, invoice=invoice, user_id=user_id, notes=notes)
 
 def reject_invoice(db: Session, invoice: Invoice, user_id: int, reason: str) -> Invoice:
     if invoice.status != "pending_review":

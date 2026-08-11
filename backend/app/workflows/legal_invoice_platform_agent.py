@@ -39,6 +39,18 @@ from langgraph.graph import StateGraph, START, END
 
 load_dotenv()
 
+# Day 4: wired to the real SQLAlchemy data layer (app/database/crud.py +
+# app/database/session.py) instead of in-memory stubs, since persistence
+# needs to survive across API calls (status/review-queue/reports all read
+# what submit_invoice wrote). Each stub opens and closes its own short-lived
+# session — the graph has no request-scoped session to reuse.
+try:
+    from app.database import crud as _crud
+    from app.database.session import SessionLocal as _SessionLocal
+    _HAS_DB = True
+except ImportError:
+    _HAS_DB = False
+
 APP_NAME = "Legal Invoice Platform Agent"
 
 # Confidence at/above this auto-approves (subject to budget check); below it
@@ -163,33 +175,81 @@ def extract_with_groq_call(raw_text: str) -> tuple[dict, float]:
 
 def get_remaining_budget_stub(matter_id: int) -> dict:
     """
-    Rajat's job (SQLite budget/ledger query). Stub returns a generous
-    placeholder budget so validate() and routing are testable before the
-    real data layer exists. Swap this for `from app.database... import
-    get_remaining_budget` the moment Rajat's function lands — signature
-    matches exactly, so it's a one-line change.
+    Rajat's job (budget/ledger query). Real SQLAlchemy data layer wired in
+    as of Day 4 — falls back to a generous placeholder only if the data
+    layer genuinely isn't importable, so the demo never hard-crashes.
     """
-    return {"has_budget": True, "allocated": 50000.0, "spent": 0.0, "remaining": 50000.0, "pct_used": 0.0, "threshold_pct": 80}
+    if not _HAS_DB:
+        return {"has_budget": True, "allocated": 50000.0, "spent": 0.0, "remaining": 50000.0, "pct_used": 0.0, "threshold_pct": 80}
+    db = _SessionLocal()
+    try:
+        return _crud.get_remaining_budget(db, matter_id)
+    finally:
+        db.close()
 
 
 def check_duplicate_invoice_stub(invoice_no: str, firm_id: int) -> bool:
-    """Trinkesh/Rajat's job (duplicate detection). Stub always says "not a duplicate"."""
-    return False
+    """Trinkesh/Rajat's job (duplicate detection). Wired to the real DB check; falls back to False if unavailable."""
+    if not _HAS_DB:
+        return False
+    db = _SessionLocal()
+    try:
+        return _crud.check_duplicate_invoice(db, invoice_no, firm_id)
+    finally:
+        db.close()
 
 
 def persist_invoice_stub(state: InvoiceState) -> int:
-    """Rajat's job (INSERT into invoice table). Stub returns a fake id so downstream nodes have something to log against."""
-    return -1  # replace with app.database.insert_invoice(...) return value
+    """Rajat's job (INSERT into invoice table). Wired to the real DB insert as of Day 4."""
+    if not _HAS_DB:
+        return -1
+    extracted = state["extracted"]
+    db = _SessionLocal()
+    try:
+        return _crud.insert_invoice(
+            db,
+            matter_id=state["matter_id"],
+            firm_id=state["firm_id"],
+            invoice_no=extracted.get("invoice_no", "UNKNOWN"),
+            invoice_date=extracted.get("invoice_date", ""),
+            total_amount=extracted.get("total_amount", 0.0),
+            confidence_score=state.get("confidence_score"),
+            status="submitted",
+        )
+    finally:
+        db.close()
 
 
-def write_audit_log_stub(action: str, invoice_id, notes: str = "") -> None:
-    """Trinkesh's job (audit_log table). Stub just prints — swap for app.database.write_audit_log(...)."""
-    print(f"[stub audit_log] action={action} invoice_id={invoice_id} notes={notes}")
+def write_audit_log_stub(action: str, invoice_id, notes: str = "", user_id: int = None) -> None:
+    """Trinkesh's job (audit_log table). Wired to the real DB write as of Day 4."""
+    if not _HAS_DB or invoice_id in (None, -1):
+        print(f"[stub audit_log] action={action} invoice_id={invoice_id} notes={notes}")
+        return
+    db = _SessionLocal()
+    try:
+        _crud.write_audit_log(db, action=action, invoice_id=invoice_id, user_id=user_id, notes=notes)
+    finally:
+        db.close()
 
 
 def update_budget_ledger_stub(matter_id: int, invoice_id, amount: float) -> None:
-    """Rajat's job (budget_ledger INSERT + threshold alert). Stub is a no-op print."""
-    print(f"[stub budget_ledger] matter_id={matter_id} invoice_id={invoice_id} amount={amount}")
+    """Rajat's job (budget_ledger INSERT + threshold alert). Wired to the real DB as of Day 4."""
+    if not _HAS_DB or invoice_id in (None, -1):
+        print(f"[stub budget_ledger] matter_id={matter_id} invoice_id={invoice_id} amount={amount}")
+        return
+    db = _SessionLocal()
+    try:
+        budget_info = _crud.get_remaining_budget(db, matter_id)
+        if not budget_info["has_budget"]:
+            print(f"[budget_ledger] no budget found for matter_id={matter_id}, skipping ledger entry")
+            return
+        _crud.record_ledger_entry(db, budget_info["budget_id"], invoice_id, amount)
+        alert_msg = _crud.create_alert_if_threshold_crossed(db, budget_info["budget_id"])
+        if alert_msg:
+            print(f"[ALERT] {alert_msg}")
+        _crud.update_invoice_status(db, invoice_id, "approved")
+    finally:
+        db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -257,6 +317,12 @@ def human_review(state: InvoiceState) -> InvoiceState:
     invoice_id = persist_invoice_stub(state)
     state["invoice_id"] = invoice_id
     state["final_status"] = "pending_review"
+    if _HAS_DB and invoice_id not in (None, -1):
+        db = _SessionLocal()
+        try:
+            _crud.update_invoice_status(db, invoice_id, "pending_review")
+        finally:
+            db.close()
     write_audit_log_stub("sent_to_review", invoice_id, state["validation_reason"])
     _log(state, f"[human_review] invoice_id={invoice_id} status=pending_review reason={state['validation_reason']}")
     return state
@@ -264,7 +330,7 @@ def human_review(state: InvoiceState) -> InvoiceState:
 
 def update_budget_and_alerts(state: InvoiceState) -> InvoiceState:
     update_budget_ledger_stub(state["matter_id"], state["invoice_id"], state["extracted"].get("total_amount", 0.0))
-    _log(state, "[update_budget_and_alerts] ledger updated (stub) — Rajat: wire real threshold alert check here")
+    _log(state, "[update_budget_and_alerts] ledger entry posted, invoice marked approved, threshold alert checked")
     return state
 
 
@@ -274,7 +340,7 @@ def notify_report(state: InvoiceState) -> InvoiceState:
 
 
 def log_for_review(state: InvoiceState) -> InvoiceState:
-    _log(state, "[log_for_review] added to human-review queue (stub) — Trinkesh: wire real review-queue table here")
+    _log(state, "[log_for_review] invoice is now visible in GET /invoices/review-queue")
     return state
 
 

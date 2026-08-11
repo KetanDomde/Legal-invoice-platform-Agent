@@ -8,11 +8,9 @@ from app.api.admin import (
     router as admin_router,
 )
 
-
 app = FastAPI(
     title="Legal Invoice Tracking API"
 )
-
 
 app.include_router(auth_router)
 app.include_router(user_router)

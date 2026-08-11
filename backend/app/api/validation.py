@@ -37,7 +37,8 @@ from app.validation.router import (
 from app.services.invoice_status_service import (
     update_invoice_status_from_validation,
 )
-
+from app.auth.dependencies import require_role
+from app.auth.roles import ADMIN, EDITOR
 
 router = APIRouter(
     prefix="/validation",
@@ -53,8 +54,7 @@ router = APIRouter(
 def validate(
     request: ValidationRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(
-        get_current_user
+    current_user: User = Depends(require_role([ADMIN, EDITOR])
     ),
 ):
     """

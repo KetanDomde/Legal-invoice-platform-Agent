@@ -1,6 +1,7 @@
-from datetime import datetime, timezone
 from sqlalchemy.orm import Session
+
 from app.models.audit_log import AuditLog
+
 
 def create_audit_log(
     db: Session,
@@ -9,17 +10,11 @@ def create_audit_log(
     invoice_id: int | None = None,
     notes: str | None = None,
 ):
-
-    """
-    Create an audit record for an invoice action.
-    """
-    
     audit = AuditLog(
-        invoice_id=invoice_id,
         user_id=user_id,
+        invoice_id=invoice_id,
         action=action,
         notes=notes,
-        timestamp=datetime.now(timezone.utc).isoformat(),
     )
 
     db.add(audit)

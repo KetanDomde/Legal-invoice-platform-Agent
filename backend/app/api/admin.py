@@ -66,6 +66,8 @@ def create_new_user(
             role=request.role,
             firm_id=request.firm_id,
             actor_user_id=current_user.user_id,
+            actor_firm_id=current_user.firm_id,   # ADD THIS LINE
+
         )
 
     except ValueError as exc:
@@ -105,6 +107,8 @@ def deactivate_existing_user(
             db=db,
             target_user_id=user_id,
             actor_user_id=current_user.user_id,
+            actor_firm_id=current_user.firm_id,   # ADD THIS LINE
+
         )
 
     except ValueError as exc:
@@ -147,6 +151,8 @@ def change_existing_user_role(
             target_user_id=user_id,
             new_role=request.role,
             actor_user_id=current_user.user_id,
+            actor_firm_id=current_user.firm_id,   # ADD THIS LINE
+
         )
 
     except ValueError as exc:

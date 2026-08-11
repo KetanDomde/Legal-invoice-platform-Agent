@@ -1,7 +1,17 @@
 from sqlalchemy.orm import Session
+
 from app.models.invoice import Invoice
+
 from app.audit.audit_logger import (
     create_audit_log,
+)
+
+from app.audit.audit_context import (
+    build_status_change_note,
+)
+
+from app.integrations.budget_service import (
+    post_approved_invoice_to_budget,
 )
 
 
@@ -12,31 +22,64 @@ def approve_invoice(
     notes: str | None = None,
 ):
     """
-    Approve an invoice from the review queue.
+    Approve an invoice after human review.
     """
 
-    if invoice.status not in [
-        "pending_review",
-        "clarification_requested",
-        "submitted",
-    ]:
+    if invoice.status != "pending_review":
         raise ValueError(
-            f"Invoice cannot be approved "
-            f"from status '{invoice.status}'."
+            "Only invoices pending review "
+            "can be approved."
         )
 
+    # --------------------------------------------------
+    # Budget integration
+    # --------------------------------------------------
+
+    budget_result = (
+        post_approved_invoice_to_budget(
+            db=db,
+            invoice=invoice,
+        )
+    )
+
+    # --------------------------------------------------
+    # Update invoice
+    # --------------------------------------------------
+    old_status = invoice.status
     invoice.status = "approved"
 
     db.add(invoice)
+
     db.commit()
+
     db.refresh(invoice)
 
+    # --------------------------------------------------
+    # Audit
+    # --------------------------------------------------
+
+    # audit_notes = (
+    #     f"Invoice approved. "
+    #     f"Budget posted: "
+    #     f"{budget_result['amount_posted']}."
+    # )
+
+    # if notes:
+    #     audit_notes += f" Notes: {notes}"
+    
+    
+    audit_note = build_status_change_note(
+    old_status=old_status,
+    new_status="approved",
+    reason=notes,
+    )
+    
     create_audit_log(
         db=db,
-        action="invoice_approved",
+        action="approved",
         user_id=user_id,
         invoice_id=invoice.invoice_id,
-        notes=notes or "Invoice approved.",
+        notes=audit_note,
     )
 
     return invoice

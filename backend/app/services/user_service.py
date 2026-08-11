@@ -39,6 +39,8 @@ def create_user(
     role: str,
     firm_id: int | None,
     actor_user_id: int,
+    actor_firm_id: int | None,   # ADD THIS LINE
+
 ):
     """
     Admin creates a new user.
@@ -46,6 +48,12 @@ def create_user(
 
     validate_role(role)
 
+      # ADD THIS BLOCK
+    if actor_firm_id is not None and firm_id != actor_firm_id:
+        raise ValueError(
+            "Cannot create a user outside your own firm."
+        )
+        
     existing_user = (
         db.query(User)
         .filter(User.email == email)
@@ -93,6 +101,8 @@ def deactivate_user(
     db: Session,
     target_user_id: int,
     actor_user_id: int,
+    actor_firm_id: int | None,   # ADD THIS LINE
+
 ):
     """
     Admin deactivates another user.
@@ -115,6 +125,13 @@ def deactivate_user(
         raise ValueError(
             "User not found."
         )
+
+     # ADD THIS BLOCK
+    if actor_firm_id is not None and user.firm_id != actor_firm_id:
+        raise ValueError(
+            "Cannot manage a user outside your own firm."
+        )
+
 
     if not user.is_active:
         raise ValueError(
@@ -145,6 +162,8 @@ def change_user_role(
     target_user_id: int,
     new_role: str,
     actor_user_id: int,
+    actor_firm_id: int | None,   # ADD THIS LINE
+
 ):
     """
     Admin changes another user's role.
@@ -170,6 +189,13 @@ def change_user_role(
             "User not found."
         )
 
+      # ADD THIS BLOCK
+    if actor_firm_id is not None and user.firm_id != actor_firm_id:
+        raise ValueError(
+            "Cannot manage a user outside your own firm."
+        )
+        
+        
     old_role = user.role
 
     if old_role == new_role:

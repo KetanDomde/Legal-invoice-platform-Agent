@@ -6,6 +6,10 @@ from app.audit.audit_logger import (
     create_audit_log,
 )
 
+from app.audit.audit_context import (
+    build_status_change_note,
+)
+
 
 def reject_invoice(
     db: Session,
@@ -13,26 +17,19 @@ def reject_invoice(
     user_id: int,
     reason: str,
 ):
-    """
-    Reject an invoice.
 
-    A rejection reason is mandatory.
-    """
+    if invoice.status != "pending_review":
+        raise ValueError(
+            "Only invoices pending review "
+            "can be rejected."
+        )
 
-    if not reason or not reason.strip():
+    if not reason.strip():
         raise ValueError(
             "Rejection reason is required."
         )
 
-    if invoice.status not in [
-        "pending_review",
-        "clarification_requested",
-        "submitted",
-    ]:
-        raise ValueError(
-            f"Invoice cannot be rejected "
-            f"from status '{invoice.status}'."
-        )
+    old_status = invoice.status
 
     invoice.status = "rejected"
 
@@ -40,12 +37,18 @@ def reject_invoice(
     db.commit()
     db.refresh(invoice)
 
+    audit_note = build_status_change_note(
+        old_status=old_status,
+        new_status="rejected",
+        reason=reason,
+    )
+
     create_audit_log(
         db=db,
-        action="invoice_rejected",
+        action="rejected",
         user_id=user_id,
         invoice_id=invoice.invoice_id,
-        notes=reason.strip(),
+        notes=audit_note,
     )
 
     return invoice

@@ -129,7 +129,6 @@ def extract_invoice_fields_mock(raw_text: str) -> dict:
         "line_items": [],  # Bhushan: populate structured line items from the real extraction
     }
 
-
 def extract_with_groq_call(raw_text: str) -> tuple[dict, float]:
     """
     Bhushan's job: the real Groq extraction call (Architecture Doc — Groq

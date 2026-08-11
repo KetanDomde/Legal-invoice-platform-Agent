@@ -42,6 +42,7 @@ def test_only_admin_can_manage_users():
     assert VIEWER not in allowed_roles
     
 
+
 from unittest.mock import Mock
 
 from app.auth.dependencies import require_role

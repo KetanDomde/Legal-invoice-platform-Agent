@@ -10,6 +10,7 @@ def update_invoice_status_from_validation(
     """
     Update invoice status after validation.
     """
+    
     invoice = (
         db.query(Invoice)
         .filter(

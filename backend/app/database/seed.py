@@ -1,6 +1,9 @@
-from app.database.database import SessionLocal
+from app.database.database import SessionLocal, engine
 from app.models.user import User
 from app.auth.password import hash_password
+from app.database.database import Base  # adjust if Base lives elsewhere
+
+Base.metadata.create_all(bind=engine)  # <-- creates tables if they don't exist yet
 
 db = SessionLocal()
 existing = (
@@ -19,7 +22,6 @@ if existing is None:
 
     db.add(admin)
     db.commit()
-
     print("Admin user created.")
 
 else:

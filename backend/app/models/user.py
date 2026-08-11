@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey
+from sqlalchemy import Column, Integer, String, ForeignKey,Boolean
 from sqlalchemy.orm import relationship
 
 from app.database.database import Base
@@ -25,4 +25,10 @@ class User(Base):
     audit_logs = relationship(
         "AuditLog",
         back_populates="user"
+    )
+    
+    is_active = Column(
+    Boolean,
+    nullable=False,
+    default=True,
     )

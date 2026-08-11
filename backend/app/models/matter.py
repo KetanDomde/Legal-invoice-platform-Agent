@@ -3,7 +3,6 @@ from sqlalchemy.orm import relationship
 
 from app.database.database import Base
 
-
 class Matter(Base):
     __tablename__ = "matters"
 

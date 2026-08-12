@@ -3,13 +3,14 @@ from __future__ import annotations
 import json
 import os
 import re
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from app.models import Invoice
-from app.services.invoice import validate_and_route_invoice
+from app.models import Invoice, LineItem, Matter, Firm
+from app.schemas.invoice_extraction import ExtractedInvoice
+from app.services.invoice import validate_invoice
 
 
 def extract_text(file_path: str) -> str:
@@ -36,11 +37,29 @@ def _mock_extract(raw_text: str) -> tuple[dict, float]:
     invoice_date = re.search(r"Date:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})", raw_text, re.I)
     total = re.search(r"Total:\s*\$?([\d,]+(?:\.\d{2})?)", raw_text, re.I)
 
+    line_items = []
+    pattern = re.compile(
+        r"[-*]\s*(?P<timekeeper>[^,\n]+),\s*[^,\n]+,\s*"
+        r"(?P<hours>[\d.]+)\s*hrs\s*@\s*\$?(?P<rate>[\d.]+).*?"
+        r"=\s*\$?(?P<amount>[\d,]+(?:\.\d{2})?)",
+        re.I,
+    )
+    for match in pattern.finditer(raw_text):
+        line_items.append(
+            {
+                "timekeeper": match.group("timekeeper").strip(),
+                "hours": float(match.group("hours")),
+                "rate": float(match.group("rate")),
+                "amount": float(match.group("amount").replace(",", "")),
+            }
+        )
+
     return (
         {
             "invoice_no": invoice_no.group(1) if invoice_no else "UNKNOWN",
             "invoice_date": invoice_date.group(1) if invoice_date else None,
             "total_amount": float(total.group(1).replace(",", "")) if total else 0.0,
+            "line_items": line_items,
         },
         0.60,
     )
@@ -54,24 +73,92 @@ def extract_invoice_fields(raw_text: str) -> tuple[dict, float]:
     from groq import Groq
 
     client = Groq(api_key=api_key)
+    schema = ExtractedInvoice.model_json_schema()
+    
     response = client.chat.completions.create(
         model=os.getenv("GROQ_MODEL", "llama-3.1-8b-instant"),
         messages=[
             {
-                "role": "user",
+                "role": "system",
                 "content": (
-                    "Extract invoice_no, invoice_date (YYYY-MM-DD), total_amount "
-                    "and confidence (0-1) as strict JSON from this invoice text:\n\n"
-                    + raw_text
+                    f"""
+                You are an expert legal invoice extraction system.
+
+                Extract all information available in the invoice.
+
+                Return ONLY JSON matching this schema:
+
+                {json.dumps(schema, indent=2)}
+
+                Important rules:
+
+                1. Do not invent values.
+                2. Use null when a value is not present.
+                3. Extract every invoice line item.
+                4. Preserve monetary values accurately.
+                5. Extract firm and matter names when present.
+                6. Do not generate database IDs such as invoice_id, firm_id,
+                matter_id, or line_item_id.
+                7. Do not omit line items.
+                """
                 ),
-            }
+            },
+            {"role": "user", "content": raw_text},
         ],
         temperature=0,
         response_format={"type": "json_object"},
     )
     data = json.loads(response.choices[0].message.content)
     confidence = float(data.pop("confidence", 0.9))
-    return data, confidence
+    extracted = ExtractedInvoice.model_validate(data)
+    return extracted.model_dump(mode="json"), confidence
+
+
+def validate_relationships(db: Session, matter_id: int, firm_id: int) -> tuple[Matter, Firm]:
+    
+    matter = db.get(Matter, matter_id)
+    if matter is None:
+        raise ValueError(f"Matter not found: {matter_id}")
+    firm = db.get(Firm, firm_id)
+    if firm is None:
+        raise ValueError(f"Firm not found: {firm_id}")
+    if matter.firm_id != firm_id:
+        raise ValueError("Matter does not belong to the supplied firm.")
+    return matter, firm
+
+
+def persist_extracted_invoice(
+    db: Session,
+    *,
+    matter_id: int,
+    firm_id: int,
+    fields: dict,
+    confidence: float,
+) -> Invoice:
+    validate_relationships(db, matter_id, firm_id)
+    parsed = ExtractedInvoice.model_validate(fields)
+    print("parsed========>:", parsed)
+    invoice = Invoice(
+        matter_id=matter_id,
+        firm_id=firm_id,
+        invoice_no=parsed.invoice_no,
+        invoice_date=parsed.invoice_date,
+        total_amount=parsed.total_amount,
+        status="submitted",
+        confidence_score=confidence,
+    )
+    invoice.line_items = [
+        LineItem(
+            timekeeper=item.timekeeper,
+            hours=item.hours,
+            rate=item.rate,
+            amount=item.amount,
+        )
+        for item in parsed.line_items
+    ]
+    db.add(invoice)
+    db.flush()
+    return invoice
 
 
 def process_invoice(
@@ -81,23 +168,19 @@ def process_invoice(
     matter_id: int,
     firm_id: int,
 ) -> Invoice:
-    raw_text = extract_text(file_path)
-    fields, confidence = extract_invoice_fields(raw_text)
+    """Backward-compatible synchronous entry point for the LangGraph pipeline."""
+    from app.workflow.graph import run_invoice_graph
 
-    invoice_date = fields.get("invoice_date")
-    parsed_date = date.fromisoformat(invoice_date) if invoice_date else None
-
-    invoice = Invoice(
+    result = run_invoice_graph(
+        db,
+        file_path=file_path,
         matter_id=matter_id,
         firm_id=firm_id,
-        invoice_no=fields.get("invoice_no", "UNKNOWN"),
-        invoice_date=parsed_date,
-        total_amount=float(fields.get("total_amount", 0)),
-        status="submitted",
-        confidence_score=confidence,
     )
-    db.add(invoice)
-    db.flush()
-
-    validate_and_route_invoice(db, invoice, confidence_score=confidence)
+    invoice_id = result.get("invoice_id")
+    if invoice_id is None:
+        raise ValueError(result.get("error", "Invoice processing failed."))
+    invoice = db.get(Invoice, invoice_id)
+    if invoice is None:
+        raise ValueError(f"Invoice {invoice_id} was not persisted.")
     return invoice

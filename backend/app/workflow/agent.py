@@ -321,16 +321,17 @@ def run_pipeline(file_path: str, matter_id: int, firm_id: int) -> InvoiceState:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=f"{APP_NAME} — run one invoice through the pipeline (Day 2 demo).")
-    parser.add_argument("file_path", help="Path to a sample invoice (PDF, or .txt for a quick smoke test)")
-    parser.add_argument("--matter-id", type=int, default=1)
-    parser.add_argument("--firm-id", type=int, default=1)
-    args = parser.parse_args()
 
-    print(f"=== {APP_NAME} — Day 2 demo run ===")
-    final_state = run_pipeline(args.file_path, args.matter_id, args.firm_id)
-    print("\n=== Final state ===")
-    print(json.dumps({k: v for k, v in final_state.items() if k != "audit_trail"}, indent=2, default=str))
-    print("\n=== Audit trail ===")
-    for line in final_state.get("audit_trail", []):
-        print(line)
+    # parser = argparse.ArgumentParser(description=f"{APP_NAME} — run one invoice through the pipeline (Day 2 demo).")
+    # parser.add_argument("file_path", help="Path to a sample invoice (PDF, or .txt for a quick smoke test)")
+    # parser.add_argument("--matter-id", type=int, default=1)
+    # parser.add_argument("--firm-id", type=int, default=1)
+    # args = parser.parse_args()
+
+    # print(f"=== {APP_NAME} — Day 2 demo run ===")
+    # final_state = run_pipeline(args.file_path, args.matter_id, args.firm_id)
+    # print("\n=== Final state ===")
+    # print(json.dumps({k: v for k, v in final_state.items() if k != "audit_trail"}, indent=2, default=str))
+    # print("\n=== Audit trail ===")
+    # for line in final_state.get("audit_trail", []):
+    #     print(line)

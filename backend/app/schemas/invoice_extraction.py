@@ -11,6 +11,10 @@ class ExtractedLineItem(BaseModel):
 
 class ExtractedInvoice(BaseModel):
     invoice_no: str
-    invoice_date: date | None = None
+    invoice_date: date
     total_amount: float = Field(ge=0)
     line_items: list[ExtractedLineItem] = Field(default_factory=list)
+
+if __name__=="__main__":
+    import json
+    print(ExtractedInvoice.model_json_schema())

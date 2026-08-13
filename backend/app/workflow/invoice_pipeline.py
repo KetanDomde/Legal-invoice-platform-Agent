@@ -1,5 +1,6 @@
 from __future__ import annotations
-
+from dotenv import load_dotenv
+load_dotenv()
 import json
 import os
 import re
@@ -100,6 +101,7 @@ def extract_invoice_fields(raw_text: str) -> tuple[dict, float]:
                 6. Do not generate database IDs such as invoice_id, firm_id,
                 matter_id, or line_item_id.
                 7. Do not omit line items.
+                8. Convert all date to 'yyyy-mm-dd' format.
                 """
                 ),
             },

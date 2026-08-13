@@ -49,7 +49,6 @@ def ingest_invoice(state: InvoiceGraphState) -> InvoiceGraphState:
 
 def extract_with_groq(state: InvoiceGraphState) -> InvoiceGraphState:
     extracted, confidence = extract_invoice_fields(state["raw_text"])
-    print("extracted:========>", extracted, confidence)
     state["extracted"] = extracted
     state["confidence_score"] = confidence
     _log(state, f"Invoice fields extracted with confidence={confidence:.2f}.")

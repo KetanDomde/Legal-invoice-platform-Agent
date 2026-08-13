@@ -5,9 +5,14 @@ from typing import TypedDict
 from langgraph.graph import END, START, StateGraph
 from sqlalchemy.orm import Session
 
-from app.models import Invoice
+from app.models import entities
+
 from app.services.invoice import add_audit_log, validate_invoice
-from app.workflow.approval_service import approve_invoice
+
+from app.workflow.approval_service import (
+    auto_approve_invoice,
+)
+
 from app.workflow.invoice_pipeline import (
     extract_invoice_fields,
     extract_text,
@@ -16,7 +21,6 @@ from app.workflow.invoice_pipeline import (
 )
 
 AUTO_APPROVE_CONFIDENCE_THRESHOLD = 0.85
-
 
 class InvoiceGraphState(TypedDict, total=False):
     db: Session
@@ -62,7 +66,7 @@ def validate(state: InvoiceGraphState) -> InvoiceGraphState:
     fields = state["extracted"]
     # Validate against a transient Invoice so the existing validation service
     # remains the single source of validation/business rules.
-    transient = Invoice(
+    transient = entities.Invoice(
         matter_id=state["matter_id"],
         firm_id=state["firm_id"],
         invoice_no=fields["invoice_no"],
@@ -70,6 +74,8 @@ def validate(state: InvoiceGraphState) -> InvoiceGraphState:
         total_amount=fields["total_amount"],
         confidence_score=state["confidence_score"],
     )
+    
+    
     result = validate_invoice(db, transient, confidence_score=state["confidence_score"])
     state["validation"] = result
     state["route"] = (
@@ -104,21 +110,34 @@ def persist_invoice(state: InvoiceGraphState) -> InvoiceGraphState:
 def route_decision(state: InvoiceGraphState) -> str:
     return state["route"]
 
+def auto_approve(
+    state: InvoiceGraphState,
+) -> InvoiceGraphState:
 
-def auto_approve(state: InvoiceGraphState) -> InvoiceGraphState:
-    invoice = state["db"].get(Invoice, state["invoice_id"])
-    if invoice is None:
-        raise ValueError("Persisted invoice could not be loaded.")
-    invoice.status = "pending_review"
-    state["db"].flush()
-    approve_invoice(
-        db=state["db"],
-        invoice=invoice,
-        user_id=None,
-        notes="Automatically approved by LangGraph after validation.",
+    db = state["db"]
+
+    invoice = db.get(
+        entities.Invoice,
+        state["invoice_id"],
     )
+
+    if invoice is None:
+        raise ValueError(
+            "Persisted invoice could not be loaded."
+        )
+
+    auto_approve_invoice(
+        db=db,
+        invoice=invoice,
+    )
+
     state["final_status"] = "approved"
-    _log(state, "Invoice auto-approved and budget workflow completed.")
+
+    _log(
+        state,
+        "Invoice auto-approved by LangGraph.",
+    )
+
     return state
 
 
@@ -135,7 +154,7 @@ def notify_report(state: InvoiceGraphState) -> InvoiceGraphState:
 
 
 def human_review(state: InvoiceGraphState) -> InvoiceGraphState:
-    invoice = state["db"].get(Invoice, state["invoice_id"])
+    invoice = state["db"].get(entities.Invoice, state["invoice_id"])
     if invoice is None:
         raise ValueError("Persisted invoice could not be loaded.")
     invoice.status = "pending_review"
@@ -209,6 +228,8 @@ def draw_graph():
     
     with open("graph_diagram.png", "wb") as f:
         f.write(png_bytes)
+        
+        
 def call_run_invoice_graph():
 
     from app.database.database import SessionLocal

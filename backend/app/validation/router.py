@@ -1,4 +1,4 @@
-CONFIDENCE_THRESHOLD = 0.90
+CONFIDENCE_THRESHOLD = 0.85
 
 def route_invoice(
     confidence_score: float,

@@ -17,7 +17,8 @@ note left here; Trinkesh's get_current_user dependency still doesn't
 exist as of this writing. Unchanged by this redesign.
 """
 from __future__ import annotations
-
+from app.auth.dependencies import get_current_user
+from app.models import User
 import re
 import uuid
 from pathlib import Path
@@ -36,8 +37,9 @@ from app.database.invoice_repository import (
 )
 from app.models.invoice import Invoice
 from app.models.invoice_item import LineItem
-from app.workflows.legal_invoice_platform_agent import run_pipeline
+# from app.workflows.legal_invoice_platform_agent import run_pipeline
 
+from app.workflow.graph import call_run_invoice_graph
 router = APIRouter(prefix="/invoices", tags=["invoices"])
 
 UPLOAD_DIR = Path(__file__).resolve().parent.parent.parent / "uploaded_invoices"
@@ -71,10 +73,14 @@ def _normalize_matter_id(matter_id: str) -> str:
 
 
 @router.post("/submit", status_code=200)
+
 async def submit_invoice(
     matter_id: str = Form(..., description="Required. Alphanumeric matter identifier."),
     file: UploadFile = File(...),
     matter_name: str | None = Form(None, description="Optional human-readable matter name (e.g. 'Nova Retail v. Green Market')."),
+    current_user: User = Depends(
+        get_current_user
+    ),
     # TODO(Trinkesh): once get_current_user exists, add:
     #   current_user = Depends(get_current_user),
 ):
@@ -91,9 +97,19 @@ async def submit_invoice(
 
     print(f"[submit_invoice] resolved DB url={RESOLVED_DATABASE_URL} matter_id={matter_id} upload_file={file.filename}")
     firm_id = get_firm_id_for_matter(matter_id)
+    
+    if (
+        current_user.firm_id is not None
+        and current_user.firm_id != firm_id
+):
+        raise HTTPException(
+            status_code=403,
+            detail="Permission denied",
+    )
+    
 
     try:
-        final_state = run_pipeline(str(saved_path), matter_id, firm_id, initial_matter_name=matter_name)
+        final_state = call_run_invoice_graph(str(saved_path), matter_id, firm_id, initial_matter_name=matter_name)
     except InvoiceAlreadyExistsError as e:
         raise HTTPException(
             status_code=409,

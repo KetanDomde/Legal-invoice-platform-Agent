@@ -1,0 +1,28 @@
+TEST INVOICE SCENARIOS
+======================
+
+01 Standard invoice
+02 Alphanumeric invoice number
+03 Multiple timekeepers
+04 Tax amount present
+05 No expenses section items
+06 Same matter, different invoice
+07 DUPLICATE invoice number (NS-2026-0147) with different matter/data
+08 Missing Matter ID (validation should flag)
+09 Missing Invoice Number (validation should flag)
+10 Long 6-month billing period
+11 Decimal hours and decimal rates
+12 Scanned/image-only invoice (OCR required)
+13 Zero-value expenses
+14 High-value invoice
+15 Billing period crossing two months
+
+Expected required fields:
+- Invoice No
+- Matter ID
+- Invoice Date
+- Billing Period
+
+Use #07 to test duplicate invoice-number detection.
+Use #08/#09 to test required-field validation.
+Use #12 to test OCR/scanned PDF handling.

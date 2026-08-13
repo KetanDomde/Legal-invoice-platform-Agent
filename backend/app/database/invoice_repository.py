@@ -15,7 +15,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.database.database import SessionLocal
 from app.models.invoice import Invoice
-from app.models.invoice_item import LineItem
+from app.models import LineItem
 from app.models.matter import Matter
 
 

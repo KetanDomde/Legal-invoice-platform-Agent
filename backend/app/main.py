@@ -9,6 +9,7 @@ from app.api.auth import router as auth_router
 from app.api.billing import router as billing_router
 from app.api.review import router as review_router
 from app.api.users import router as users_router
+from app.api.invoices import router as invoice_router
 from app.api.validation import router as validation_router
 from app.database.init_db import init_db
 
@@ -41,6 +42,7 @@ app.include_router(billing_router)
 app.include_router(validation_router)
 app.include_router(review_router)
 app.include_router(audit_router)
+app.include_router(invoice_router)
 
 
 @app.get("/", tags=["Health"])

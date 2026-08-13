@@ -209,41 +209,47 @@ def draw_graph():
     
     with open("graph_diagram.png", "wb") as f:
         f.write(png_bytes)
-
 def call_run_invoice_graph():
 
     from app.database.database import SessionLocal
     from app.models.matter import Matter
     from app.models.firm import Firm
 
-    matter = Matter(
-            firm_id=1,
-            name="Firm 1 Matter",
-            owner="Owner 1",
-            status="open",
-        )
-    firm = Firm(
+    db = SessionLocal()
+
+    # Seed firm/matter only if they don't already exist
+    firm = db.get(Firm, 1)
+    if firm is None:
+        firm = Firm(
             firm_id=1,
             name="Sample Outside Counsel LLP",
             contact_email="contact@samplefirm.com",
             status="active",
         )
+        db.add(firm)
+        db.commit()
 
-    
-    
-    db = SessionLocal()
-    # db.add(matter)
-    # db.add(firm)
+    matter = db.get(Matter, 1)
+    if matter is None:
+        matter = Matter(
+            firm_id=1,
+            matter_id=1,
+            name="Firm 1 Matter",
+            owner="Owner 1",
+            status="open",
+        )
+        db.add(matter)
+        db.commit()
 
-    # db.commit()
+    from pathlib import Path
+
+    REPO_ROOT = Path(__file__).resolve().parents[3]
+    TEST_INVOICE_PATH = REPO_ROOT / "legal_docs" / "test_invoice.pdf"
 
     state = run_invoice_graph(
-        db, 
-        file_path=r"C:\Users\RAJAT-BOMBALE\capstone\Legal-invoice-platform-Agent\legal_docs\test_invoice.pdf", 
-        matter_id=1, 
-        firm_id=1
+        db,
+        file_path=str(TEST_INVOICE_PATH),
+        matter_id=1,
+        firm_id=1,
     )
     print(state)
-
-if __name__ == "__main__":
-    call_run_invoice_graph()

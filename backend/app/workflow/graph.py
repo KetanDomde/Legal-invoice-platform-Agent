@@ -714,28 +714,67 @@ def draw_graph():
         f.write(png_bytes)
         
         
-def call_run_invoice_graph(filepath, matter_id):
-    """
-    Entry point used by both POST /invoices/submit and run_graph.py.
+# def call_run_invoice_graph(filepath, matter_id):
 
-    Fixed during QA pass (14 Aug 2026):
-      - `db` was never closed — every call leaked a SQLite session.
-        Wrapped in try/finally so it's always closed, including on error.
-      - A nonexistent matter_id used to crash here with an unhandled
-        AttributeError (`matter.firm_id` when matter is None). The API
-        layer (app/api/invoices.py submit_invoice) now checks for this
-        before ever calling this function, but this raises a clear
-        ValueError too as defense-in-depth for any other caller
-        (run_graph.py, future code) that doesn't pre-check.
-    """
+#     from app.database.database import SessionLocal
+#     from app.models.matter import Matter
+#     from app.models.firm import Firm
+
+#     db = SessionLocal()
+
+#     # Seed firm/matter only if they don't already exist
+#     # firm = db.get(Firm, 1)
+#     # if firm is None:
+#     #     firm = Firm(
+#     #         firm_id=1,
+#     #         name="Sample Outside Counsel LLP",
+#     #         contact_email="contact@samplefirm.com",
+#     #         status="active",
+#     #     )
+#     #     db.add(firm)
+#     #     db.commit()
+
+#     matter = db.get(Matter, matter_id)
+#     # if matter is None:
+#     #     matter = Matter(
+#     #         firm_id=1,
+#     #         matter_id=1,
+#     #         name="Firm 1 Matter",
+#     #         owner="Owner 1",
+#     #         status="open",
+#     #     )
+#     #     db.add(matter)
+#     #     db.commit()
+
+#     # from pathlib import Path
+
+#     # REPO_ROOT = Path(__file__).resolve().parents[3]
+#     # TEST_INVOICE_PATH = REPO_ROOT / "legal_docs" / "test_invoice.pdf"
+
+#     state = run_invoice_graph(
+#         db,
+#         file_path=filepath,
+#         matter_id=matter_id,
+#         firm_id=matter.firm_id,
+#     )
+#     print(state)
+#     return state
+
+def call_run_invoice_graph(filepath, matter_id):
     from app.database.database import SessionLocal
     from app.models.matter import Matter
+    from fastapi import HTTPException
 
     db = SessionLocal()
+
     try:
         matter = db.get(Matter, matter_id)
+
         if matter is None:
-            raise ValueError(f"Matter not found: {matter_id!r}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"Matter '{matter_id}' not found. Create it before submitting an invoice against it.",
+            )
 
         state = run_invoice_graph(
             db,
@@ -743,7 +782,9 @@ def call_run_invoice_graph(filepath, matter_id):
             matter_id=matter_id,
             firm_id=matter.firm_id,
         )
+
         print(state)
         return state
+
     finally:
         db.close()

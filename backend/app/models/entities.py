@@ -26,7 +26,7 @@ class Firm(Base):
 class Matter(Base):
     __tablename__ = "matters"
 
-    matter_id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    matter_id: Mapped[str] = mapped_column(String(50), primary_key=True, index=True)  # was Integer
     firm_id: Mapped[int] = mapped_column(ForeignKey("firms.firm_id"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     owner: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -73,10 +73,13 @@ class Invoice(Base):
 
 
     invoice_id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True,autoincrement=True)
-    matter_id: Mapped[int] = mapped_column(ForeignKey("matters.matter_id"), nullable=False, index=True)
+    matter_id: Mapped[str] = mapped_column(ForeignKey("matters.matter_id"), nullable=False, index=True)  # was int
     firm_id: Mapped[int] = mapped_column(ForeignKey("firms.firm_id"), nullable=False, index=True)
-    invoice_no: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    invoice_no: Mapped[Optional[str]] = mapped_column(String(100), index=True)  # nullable now — extracted, not required
     invoice_date: Mapped[Optional[date]] = mapped_column(Date)
+    billing_period_start: Mapped[Optional[date]] = mapped_column(Date)   # add — was missing
+    billing_period_end: Mapped[Optional[date]] = mapped_column(Date)     # add — was missing
+    matter_name: Mapped[Optional[str]] = mapped_column(String(255))  
     total_amount: Mapped[float] = mapped_column(Numeric(14, 2), nullable=False)
     status: Mapped[str] = mapped_column(String(50), default="submitted", nullable=False, index=True)
     confidence_score: Mapped[Optional[float]] = mapped_column(Float)
@@ -92,6 +95,7 @@ class Invoice(Base):
         back_populates="invoice",
         cascade="all, delete-orphan",
     )
+    
     ledger_entries: Mapped[list["BudgetLedger"]] = relationship(back_populates="invoice")
     audit_logs: Mapped[list["AuditLog"]] = relationship(back_populates="invoice")
 

@@ -4,7 +4,7 @@ functions from Bhushan's original task assignment. Covers every case
 manually verified over the course of building this, so it stays
 regression-tested instead of "verified once, trust forever."
 """
-from app.workflows.legal_invoice_platform_agent import (
+from app.workflow.legal_invoice_platform_agent import (
     extract_text_from_pdf,
     extract_with_groq_call,
     extract_invoice_fields_mock,
@@ -42,7 +42,7 @@ class TestExtractTextFromPdf:
         """Direct test of the normalizer bug: previously `li.get("timekeeper")
         or "UNKNOWN"` silently replaced None with "UNKNOWN" even when the
         model correctly returned null."""
-        from app.workflows.legal_invoice_platform_agent import _normalize_extracted_fields
+        from app.workflow.legal_invoice_platform_agent import _normalize_extracted_fields
 
         raw = {
             "invoice_no": "INV-1001",
@@ -68,7 +68,7 @@ class TestExtractTextFromPdf:
         """If a model response doesn't include line_type at all (schema
         drift, older cached response, etc.), infer it from timekeeper
         presence rather than defaulting everything to "fee"."""
-        from app.workflows.legal_invoice_platform_agent import _normalize_extracted_fields
+        from app.workflow.legal_invoice_platform_agent import _normalize_extracted_fields
 
         raw = {
             "invoice_no": "INV-1001",
@@ -172,7 +172,7 @@ class TestGroqRetryBackoff:
         from unittest.mock import MagicMock
         import time as time_module
         import groq
-        import app.workflows.legal_invoice_platform_agent as wf
+        import app.workflow.legal_invoice_platform_agent as wf
 
         monkeypatch.setenv("GROQ_API_KEY", "fake-real-looking-key-not-the-placeholder")
         sleep_calls = []
@@ -204,7 +204,7 @@ class TestGroqRetryBackoff:
         from unittest.mock import MagicMock
         import time as time_module
         import groq
-        import app.workflows.legal_invoice_platform_agent as wf
+        import app.workflow.legal_invoice_platform_agent as wf
 
         monkeypatch.setenv("GROQ_API_KEY", "fake-real-looking-key-not-the-placeholder")
         monkeypatch.setattr(time_module, "sleep", lambda seconds: None)

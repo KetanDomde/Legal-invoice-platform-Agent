@@ -7,8 +7,10 @@ import re
 from datetime import date
 from pathlib import Path
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.database.invoice_repository import InvoiceAlreadyExistsError
 from app.models import Invoice, LineItem, Matter, Firm
 from app.schemas.invoice_extraction import ExtractedInvoice
 from app.services.invoice import validate_invoice
@@ -159,7 +161,16 @@ def persist_extracted_invoice(
         for item in parsed.line_items
     ]
     db.add(invoice)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError as e:
+        # Same invoice_no already exists for this matter_id (the unique
+        # constraint on the invoices table). This used to propagate as a
+        # raw, unhandled IntegrityError all the way up to a bare 500 —
+        # now it's a typed, catchable error the API layer turns into a
+        # clean 409 (see app/api/invoices.py submit_invoice).
+        db.rollback()
+        raise InvoiceAlreadyExistsError(invoice_no=parsed.invoice_no, matter_id=str(matter_id)) from e
     return invoice
 
 

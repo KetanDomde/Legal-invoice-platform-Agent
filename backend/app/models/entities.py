@@ -4,7 +4,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, Numeric, String, Text,UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.database import Base
@@ -67,8 +67,12 @@ class Budget(Base):
 
 class Invoice(Base):
     __tablename__ = "invoices"
+    __table_args__ = (
+    UniqueConstraint("invoice_no", "matter_id", name="uix_invoice_no_matter"),
+)
 
-    invoice_id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    invoice_id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True,autoincrement=True)
     matter_id: Mapped[int] = mapped_column(ForeignKey("matters.matter_id"), nullable=False, index=True)
     firm_id: Mapped[int] = mapped_column(ForeignKey("firms.firm_id"), nullable=False, index=True)
     invoice_no: Mapped[str] = mapped_column(String(100), nullable=False, index=True)

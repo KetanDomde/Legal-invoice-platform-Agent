@@ -2,9 +2,8 @@
 Thin wrapper around the FastAPI backend used by every Streamlit page.
 
 Endpoint shapes here mirror the real backend exactly (backend/app/api/*.py,
-backend/app/schemas/*.py) — not a guess. Point API_BASE_URL at the real
-server (default http://localhost:8000) once the frontend is wired in for
-real; it also works unchanged against the mock preview server.
+backend/app/schemas/*.py). Point API_BASE_URL / base_url at the real
+server (default http://localhost:8000).
 """
 import requests
 import streamlit as st
@@ -32,7 +31,10 @@ class APIClient:
 
     def _call(self, method: str, path: str, **kwargs):
         try:
-            resp = requests.request(method, f"{self.base_url}{path}", headers=self._headers(), timeout=10, **kwargs)
+            resp = requests.request(
+                method, f"{self.base_url}{path}",
+                headers=self._headers(), timeout=kwargs.pop("timeout", 10), **kwargs
+            )
         except requests.exceptions.ConnectionError:
             raise APIError(0, f"Can't reach the API at {self.base_url}. Is the backend running?")
         if resp.status_code >= 400:
@@ -44,6 +46,10 @@ class APIClient:
         if resp.status_code == 204 or not resp.content:
             return None
         return resp.json()
+
+    # --- health ---------------------------------------------------------
+    def health(self):
+        return self._call("GET", "/health")
 
     # --- auth -------------------------------------------------------------
     def login(self, email: str, password: str):
@@ -86,24 +92,36 @@ class APIClient:
         return self._call("POST", "/budgets", json={
             "matter_id": matter_id, "allocated_amt": allocated_amt, "threshold_pct": threshold_pct})
 
-    # --- invoices / line items ----------------------------------------------
-    def list_invoices(self, matter_id=None, firm_id=None):
-        return self._call("GET", "/invoices", params={"matter_id": matter_id, "firm_id": firm_id})
+    # --- invoices -------------------------------------------------------
+    # Real pipeline endpoint (confirmed working — from Bhushan's test harness):
+    # POST /invoices/submit, multipart form: invoice_id, matter_id, file
+    # --- invoices -------------------------------------------------------
+    # Based on models/invoice.py: matter_id is a STRING FK, invoice_id is
+    # a system-generated int PK, invoice_no/dates/amount are extracted
+    # from the PDF server-side — not entered by the uploader.
+    def submit_invoice(self, matter_id: str, file):
+        """
+        Upload a PDF to the extraction/validation pipeline.
+        `file` is a Streamlit UploadedFile (has .name and .getvalue()).
+        """
+        files = {"file": (file.name, file.getvalue(), file.type or "application/pdf")}
+        data = {"matter_id": matter_id}  # VERIFY: field name + that invoice_id is NOT sent
+        return self._call("POST", "/invoices/submit", data=data, files=files, timeout=60)
 
-    def get_invoice(self, invoice_id: int):
+    def get_invoice(self, invoice_id: int):  # VERIFY: int PK now, not string
         return self._call("GET", f"/invoices/{invoice_id}")
 
-    def create_invoice(self, matter_id, firm_id, invoice_no, total_amount, invoice_date=None):
-        return self._call("POST", "/invoices", json={
-            "matter_id": matter_id, "firm_id": firm_id, "invoice_no": invoice_no,
-            "invoice_date": str(invoice_date) if invoice_date else None, "total_amount": total_amount})
-
-    def list_line_items(self, invoice_id: int | None = None):
+    def list_invoices(self, matter_id=None, firm_id=None):
+        params = {}
+        if matter_id is not None:
+            params["matter_id"] = matter_id
+        if firm_id is not None:
+            params["firm_id"] = firm_id
+        return self._call("GET", "/invoices", params=params or None)
+    
+    
+    def list_line_items(self, invoice_id=None):
         return self._call("GET", "/line-items", params={"invoice_id": invoice_id})
-
-    def create_line_item(self, invoice_id, amount, timekeeper=None, hours=None, rate=None):
-        return self._call("POST", "/line-items", json={
-            "invoice_id": invoice_id, "timekeeper": timekeeper, "hours": hours, "rate": rate, "amount": amount})
 
     # --- budget ledger / alerts ----------------------------------------------
     def list_budget_ledger(self, budget_id=None, invoice_id=None):
@@ -116,13 +134,13 @@ class APIClient:
     def review_queue(self):
         return self._call("GET", "/review/queue")
 
-    def approve(self, invoice_id: int, notes: str | None = None):
+    def approve(self, invoice_id, notes: str | None = None):
         return self._call("POST", f"/review/{invoice_id}/approve", params={"notes": notes})
 
-    def reject(self, invoice_id: int, reason: str):
+    def reject(self, invoice_id, reason: str):
         return self._call("POST", f"/review/{invoice_id}/reject", params={"reason": reason})
 
-    def clarify(self, invoice_id: int, reason: str):
+    def clarify(self, invoice_id, reason: str):
         return self._call("POST", f"/review/{invoice_id}/clarify", params={"reason": reason})
 
     # --- validation ------------------------------------------------------------

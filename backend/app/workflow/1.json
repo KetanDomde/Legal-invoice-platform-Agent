@@ -1,0 +1,31 @@
+{'db': <sqlalchemy.orm.session.Session object at 0x0000026841ABB5C0>, 'file_path': WindowsPath('C:/Users/RAJAT-BOMBALE/capstone/Legal-invoice-platform-Agent/backend/uploaded_invoices/c25c8e2d7b344d2782f9e04fbce159d5_04_tax_invoice.pdf'), 'matter_id': '1', 'firm_id': 1, 'raw_text': 'RIVERSTONE COUNSEL LLP\n72 River Road, Suite 500\nInvoice\nInvoice No: RS-26-0319\nInvoice Date: 2026-08-11\nMatter: MAT-9034 - Apex Foods Compliance Matter\nBilling Period: 2026-07-01 to 2026-07-31\nTimekeeper\nRole\nDate\nHours\nRate\nAmount\nE. Brooks\nPartner\n2026-07-04\n3\n500.00\n1,
+    500.00\nL. Mehta\nAssociate\n2026-07-11\n5.5\n275.00\n1,
+    512.50\nExpenses\nFiling Fee\n120.00\nSubtotal:\n3,
+    132.50\nTax:\n125.00\nTotal:\n$3,
+    257.50\n', 'extracted': {'invoice_no': 'RS-26-0319', 'invoice_date': '2026-08-11', 'total_amount': 3257.5, 'line_items': [
+            {'timekeeper': 'E. Brooks', 'hours': 3.0, 'rate': 500.0, 'amount': 1500.0
+            },
+            {'timekeeper': 'L. Mehta', 'hours': 5.5, 'rate': 275.0, 'amount': 1512.5
+            },
+            {'timekeeper': None, 'hours': None, 'rate': None, 'amount': 120.0
+            }
+        ]
+    }, 'confidence_score': 0.9, 'invoice_id': 4, 'validation': {'validation_passed': True, 'budget_ok': True, 'remaining_budget': 0.0, 'duplicate': False, 'duplicate_invoice_id': None, 'confidence_score': 0.9, 'confidence_threshold': 0.85, 'decision': 'auto_approved', 'reasons': ['All validation checks passed.'
+        ]
+    }, 'route': 'auto_approve', 'final_status': 'approved', 'audit_trail': ['[
+            2026-08-13T10: 21: 05.196485+00: 00
+        ] Invoice document ingested.', '[
+            2026-08-13T10: 21: 06.902862+00: 00
+        ] Invoice fields extracted with confidence=0.90.', '[
+            2026-08-13T10: 21: 06.924818+00: 00
+        ] Validation completed: auto_approve.', '[
+            2026-08-13T10: 21: 06.959060+00: 00
+        ] Invoice persisted with id=4 and 3 line items.', '[
+            2026-08-13T10: 21: 06.993184+00: 00
+        ] Invoice auto-approved by LangGraph.', '[
+            2026-08-13T10: 21: 06.995724+00: 00
+        ] Budget and alert side effects handled by approval workflow.', '[
+            2026-08-13T10: 21: 06.997233+00: 00
+        ] Processing completed with status=approved.'
+    ]
+}

@@ -17,15 +17,17 @@ note left here; Trinkesh's get_current_user dependency still doesn't
 exist as of this writing. Unchanged by this redesign.
 """
 from __future__ import annotations
-
+from app.auth.dependencies import get_current_user
+from app.models import User
 import re
 import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session, joinedload
+from app.core.config import settings
 
-from app.database.database import RESOLVED_DATABASE_URL, get_db
+from app.database.database import  get_db
 from app.database.invoice_repository import (
     InvoiceAlreadyExistsError,
     InvoiceNotFoundError,
@@ -34,9 +36,11 @@ from app.database.invoice_repository import (
     invoice_exists,
     update_invoice_with_line_items,
 )
-from app.models.invoice import Invoice
-from app.models.invoice_item import LineItem
-from app.workflows.legal_invoice_platform_agent import run_pipeline
+from app.models.entities import Invoice
+from app.models.entities import LineItem
+# from app.workflows.legal_invoice_platform_agent import run_pipeline
+
+from app.workflow.graph import call_run_invoice_graph
 
 router = APIRouter(prefix="/invoices", tags=["invoices"])
 
@@ -75,6 +79,9 @@ async def submit_invoice(
     matter_id: str = Form(..., description="Required. Alphanumeric matter identifier."),
     file: UploadFile = File(...),
     matter_name: str | None = Form(None, description="Optional human-readable matter name (e.g. 'Nova Retail v. Green Market')."),
+    current_user: User = Depends(
+        get_current_user
+    ),
     # TODO(Trinkesh): once get_current_user exists, add:
     #   current_user = Depends(get_current_user),
 ):
@@ -89,18 +96,30 @@ async def submit_invoice(
     content = await file.read()
     saved_path = _save_upload_to_disk(file, content)
 
-    print(f"[submit_invoice] resolved DB url={RESOLVED_DATABASE_URL} matter_id={matter_id} upload_file={file.filename}")
-    firm_id = get_firm_id_for_matter(matter_id)
+    print(f"[submit_invoice] resolved DB url={settings.DATABASE_URL} matter_id={matter_id} upload_file={file.filename}")
+    
+    
 
-    try:
-        final_state = run_pipeline(str(saved_path), matter_id, firm_id, initial_matter_name=matter_name)
-    except InvoiceAlreadyExistsError as e:
+    # try:
+    firm_id = get_firm_id_for_matter(matter_id)
+        
+    if (
+        current_user.firm_id is not None
+        and current_user.firm_id != firm_id
+    ):
         raise HTTPException(
-            status_code=409,
-            detail=str(e),
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Pipeline failed: {e}")
+            status_code=403,
+            detail="Permission denied",
+    )
+
+    final_state = call_run_invoice_graph(saved_path, matter_id)
+    # except InvoiceAlreadyExistsError as e:
+    #     raise HTTPException(
+    #         status_code=409,
+    #         detail=str(e),
+    #     )
+    # except Exception as e:
+    #     raise HTTPException(status_code=500, detail=f"Pipeline failed: {e}")
 
     return _build_submit_response(final_state)
 
@@ -183,7 +202,7 @@ def get_invoice_endpoint(invoice_id: int, db: Session = Depends(get_db)):
 def list_invoices(db: Session = Depends(get_db)):
     """List all invoices — quick way to eyeball everything submitted so
     far. Useful for a dashboard's landing view later."""
-    print(f"[list_invoices] resolved DB url={RESOLVED_DATABASE_URL}")
+    print(f"[list_invoices] resolved DB url={settings.DATABASE_URL}")
     invoices = db.query(Invoice).order_by(Invoice.invoice_id).all()
     return [
         {

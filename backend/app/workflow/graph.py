@@ -9,9 +9,12 @@ from typing import Optional, TypedDict
 from datetime import datetime, timezone
 from typing import TypedDict
 import io
+from langgraph import graph
 import pytesseract
 from PIL import Image
-
+from app.database.database import SessionLocal
+from app.models.matter import Matter
+from fastapi import HTTPException
 from langgraph.graph import END, START, StateGraph
 from sqlalchemy.orm import Session
 
@@ -73,6 +76,7 @@ EXTRACTION_SYSTEM_PROMPT = (
 class InvoiceGraphState(TypedDict, total=False):
     db: Session
     file_path: str
+    matter_no_override: str | None   # NEW
     matter_id: int
     firm_id: int
     raw_text: str
@@ -84,23 +88,20 @@ class InvoiceGraphState(TypedDict, total=False):
     final_status: str
     audit_trail: list[str]
     error: str
-
+    
+    
 def _ocr_pdf_pages(doc) -> str:
     """
     Rasterize each page of an open PyMuPDF document and run Tesseract OCR
-    on it. Used when the PDF has no usable native text layer — i.e. it's a
-    scanned/image-only invoice (Architecture Doc §7 edge case).
-
-    Relies on `tesseract` being resolvable on PATH (same approach as
-    app/workflow/legal_invoice_platform_agent.py's copy of this
-    function), rather than a hardcoded path — the previous hardcoded
-    path (`C:\\Program Files\\Tessaract-OCR\\tesseract.exe`) was
-    Windows-only and misspelled ("Tessaract"), so it silently never
-    worked even on a Windows machine with Tesseract actually installed
-    at the correct path.
+    on it. Used when the PDF has no usable native text layer.
     """
     import pytesseract
     from PIL import Image
+
+    # Explicit path first (reliable on Windows regardless of PATH state),
+    # falling back to PATH auto-discovery on other platforms.
+    tesseract_cmd = os.getenv("TESSERACT_CMD", r"C:\Program Files\Tesseract-OCR\tesseract.exe")
+    pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
 
     page_texts = []
     for page in doc:
@@ -299,6 +300,8 @@ def extract_invoice_fields_mock(raw_text: str) -> dict:
         "invoice_date": date_match.group(1) if date_match else datetime.now().strftime("%Y-%m-%d"),
         "billing_period_start": billing_period_match.group(1) if billing_period_match else None,
         "billing_period_end": billing_period_match.group(2) if billing_period_match else None,
+        "matter_no": matter_match.group(1).strip() if matter_match else None,      # NEW
+
         "matter_name": matter_match.group(2).strip() if matter_match else None,
         "total_amount": total_amount,
         "line_items": line_items,
@@ -324,6 +327,9 @@ def _build_extraction_prompt(raw_text: str) -> str:
         '  "invoice_date": string (YYYY-MM-DD),\n'
         '  "billing_period_start": string or null (YYYY-MM-DD — start of the billing period covered by this invoice),\n'
         '  "billing_period_end": string or null (YYYY-MM-DD — end of the billing period covered by this invoice),\n'
+        '  "matter_no": string or null (the matter/case identifier printed on the invoice, e.g. "MAT-771B"),\n'
+        '  "matter_name": string or null (the matter/case name, e.g. "Nova Retail v. Green Market"),\n'
+        
         '  "total_amount": number (no currency symbol, no commas),\n'
         '  "line_items": [\n'
         "    {\n"
@@ -398,6 +404,8 @@ def _normalize_extracted_fields(data: dict) -> dict:
         "invoice_date": data.get("invoice_date"),
         "billing_period_start": data.get("billing_period_start"),
         "billing_period_end": data.get("billing_period_end"),
+        "matter_no": (data.get("matter_no") or "").strip() or None,
+        "matter_name": data.get("matter_name"),
         "total_amount": _to_float(data.get("total_amount")),
         "line_items": line_items,
     }
@@ -514,6 +522,38 @@ def extract_with_groq_call(raw_text: str) -> tuple[dict, float]:
     confidence = round((model_confidence + completeness) / 2, 2)
 
     return fields, confidence
+
+
+def resolve_matter(state: InvoiceGraphState) -> InvoiceGraphState:
+    from app.database.invoice_repository import get_or_create_matter
+
+    extracted = state["extracted"]
+    matter_no = extracted.get("matter_no") or state.get("matter_no_override")
+
+    if not matter_no:
+        # No matter identifier extractable at all — can't proceed automatically.
+        state["error"] = "no_matter_identifier"
+        _log(state, "No matter_no could be extracted from the invoice; cannot resolve a matter.")
+        return state
+
+    matter = get_or_create_matter(state["db"], matter_no, extracted.get("matter_name"))
+    state["matter_id"] = matter.matter_id
+    state["firm_id"] = matter.firm_id
+    _log(state, f"Resolved matter_no={matter_no!r} to matter_id={matter.matter_id} (firm_id={matter.firm_id}).")
+    return state
+
+
+def route_after_resolve(state: InvoiceGraphState) -> str:
+    return "no_matter" if state.get("error") == "no_matter_identifier" else "matter_ok"
+
+
+def no_matter_found(state: InvoiceGraphState) -> InvoiceGraphState:
+    state["final_status"] = "extraction_failed_no_matter"
+    _log(state, "Routed to manual handling — no matter identifier found on the invoice.")
+    return state
+
+
+
 
 def _log(state: InvoiceGraphState, message: str) -> None:
     state.setdefault("audit_trail", []).append(
@@ -663,6 +703,10 @@ def build_invoice_graph():
     graph = StateGraph(InvoiceGraphState)
     graph.add_node("ingest_invoice", ingest_invoice)
     graph.add_node("extract_with_groq", extract_with_groq)
+    
+    graph.add_node("resolve_matter", resolve_matter)          # NEW
+    graph.add_node("no_matter_found", no_matter_found)         # NEW
+    
     graph.add_node("validate", validate)
     graph.add_node("persist_invoice", persist_invoice)
     graph.add_node("auto_approve", auto_approve)
@@ -673,7 +717,16 @@ def build_invoice_graph():
 
     graph.add_edge(START, "ingest_invoice")
     graph.add_edge("ingest_invoice", "extract_with_groq")
-    graph.add_edge("extract_with_groq", "validate")
+    
+    graph.add_edge("extract_with_groq", "resolve_matter")
+    
+    graph.add_conditional_edges(
+        "resolve_matter",
+        route_after_resolve,
+        {"matter_ok": "validate", "no_matter": "no_matter_found"},
+    )
+    graph.add_edge("no_matter_found", END)
+    
     graph.add_edge("validate", "persist_invoice")
     graph.add_conditional_edges(
         "persist_invoice",
@@ -692,16 +745,14 @@ def run_invoice_graph(
     db: Session,
     *,
     file_path: str,
-    matter_id: int = None,
-    firm_id: int = None,
+    matter_no_override: str | None = None,
 ) -> InvoiceGraphState:
     graph = build_invoice_graph()
     return graph.invoke(
         {
             "db": db,
             "file_path": file_path,
-            "matter_id": matter_id,
-            "firm_id": firm_id,
+            "matter_no_override": matter_no_override,
             "audit_trail": [],
         }
     )
@@ -759,32 +810,14 @@ def draw_graph():
 #     )
 #     print(state)
 #     return state
-
-def call_run_invoice_graph(filepath, matter_id):
+def call_run_invoice_graph(filepath, matter_no_override: str | None = None):
     from app.database.database import SessionLocal
-    from app.models.matter import Matter
-    from fastapi import HTTPException
 
     db = SessionLocal()
-
     try:
-        matter = db.get(Matter, matter_id)
-
-        if matter is None:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Matter '{matter_id}' not found. Create it before submitting an invoice against it.",
-            )
-
-        state = run_invoice_graph(
-            db,
-            file_path=filepath,
-            matter_id=matter_id,
-            firm_id=matter.firm_id,
-        )
-
+        state = run_invoice_graph(db, file_path=filepath, matter_no_override=matter_no_override)
+        db.commit()
         print(state)
         return state
-
     finally:
         db.close()

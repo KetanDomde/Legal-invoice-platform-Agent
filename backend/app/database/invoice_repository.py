@@ -12,13 +12,55 @@ This file's functions reflect that:
 from __future__ import annotations
 
 from datetime import date, datetime
-
 from sqlalchemy.exc import IntegrityError
 
 from app.database.database import SessionLocal
 from app.models.invoice import Invoice
 from app.models import LineItem
 from app.models.matter import Matter
+
+from app.models.firm import Firm  # add to your existing imports at the top
+
+UNASSIGNED_FIRM_NAME = "Unassigned Firm (Auto)"
+
+
+def get_or_create_unassigned_firm(db) -> "Firm":
+    """Fallback firm for matters auto-created from invoice extraction
+    when the PDF has no extractable firm identity. Reassign the real
+    firm later via PATCH /matters/{id}."""
+    firm = db.query(Firm).filter(Firm.name == UNASSIGNED_FIRM_NAME).first()
+    if firm is None:
+        firm = Firm(name=UNASSIGNED_FIRM_NAME, status="active")
+        db.add(firm)
+        db.flush()
+    return firm
+
+
+def get_or_create_matter(db, matter_no: str, matter_name: str | None = None):
+    """
+    Resolves a Matter by its extracted matter_no. Auto-creates one under
+    the fallback Unassigned Firm if it doesn't exist yet, so invoice
+    upload never blocks on a missing matter.
+    """
+    matter_no = (matter_no or "").strip()
+    if not matter_no:
+        return None
+
+    matter = db.query(Matter).filter(Matter.matter_no == matter_no).first()
+    if matter is not None:
+        return matter
+
+    firm = get_or_create_unassigned_firm(db)
+    matter = Matter(
+        matter_no=matter_no,
+        firm_id=firm.firm_id,
+        name=matter_name or f"Auto-created from invoice ({matter_no})",
+        owner="Unassigned",
+        status="open",
+    )
+    db.add(matter)
+    db.flush()
+    return matter
 
 
 def _coerce_date(value):

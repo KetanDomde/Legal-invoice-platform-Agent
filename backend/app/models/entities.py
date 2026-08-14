@@ -26,7 +26,9 @@ class Firm(Base):
 class Matter(Base):
     __tablename__ = "matters"
 
-    matter_id: Mapped[str] = mapped_column(String(50), primary_key=True, index=True)  # was Integer
+    matter_id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)  # FIXED: str -> int
+    matter_no: Mapped[Optional[str]] = mapped_column(String(50), index=True)   # ADD THIS LINE
+
     firm_id: Mapped[int] = mapped_column(ForeignKey("firms.firm_id"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     owner: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -73,7 +75,7 @@ class Invoice(Base):
 
 
     invoice_id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True,autoincrement=True)
-    matter_id: Mapped[str] = mapped_column(ForeignKey("matters.matter_id"), nullable=False, index=True)  # was int
+    matter_id: Mapped[int] = mapped_column(ForeignKey("matters.matter_id"), nullable=False, index=True)  # was int
     firm_id: Mapped[int] = mapped_column(ForeignKey("firms.firm_id"), nullable=False, index=True)
     invoice_no: Mapped[Optional[str]] = mapped_column(String(100), index=True)  # nullable now — extracted, not required
     invoice_date: Mapped[Optional[date]] = mapped_column(Date)

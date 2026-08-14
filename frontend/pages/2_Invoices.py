@@ -34,7 +34,7 @@ if user["role"] in ("admin", "editor"):
                 matter_id = matter_lookup[matter_label]
                 with st.spinner("Extracting and validating..."):
                     try:
-                        result = client.submit_invoice(matter_id, uploaded_file)
+                        result = client.submit_invoice(uploaded_file, matter_no=None)
                     except APIError as e:
                         if e.status_code == 409:
                             st.error(f"🚫 Duplicate invoice: {e.detail}")

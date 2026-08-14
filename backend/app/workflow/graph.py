@@ -25,7 +25,6 @@ from app.workflow.approval_service import (
 
 from app.workflow.invoice_pipeline import (
     extract_invoice_fields,
-    extract_text,
     persist_extracted_invoice,
     validate_relationships,
 )
@@ -61,7 +60,6 @@ OCR_RENDER_DPI = 300
 
 GROQ_MAX_RETRIES = 3
 GROQ_RETRY_BASE_DELAY_SECONDS = 1.5  # exponential backoff: 1.5s, 3s, 6s
-pytesseract_path = r'C:\Program Files\Tessaract-OCR\tesseract.exe'
 
 EXTRACTION_SYSTEM_PROMPT = (
     "You are an accurate invoice data extraction engine for a legal spend "
@@ -87,21 +85,22 @@ class InvoiceGraphState(TypedDict, total=False):
     audit_trail: list[str]
     error: str
 
-def parse_image(path):
-    pytesseract.pytesseract.tesseract_cmd = pytesseract_path
-    img = Image.open(path)
-    return pytesseract.image_to_string(img)
-
 def _ocr_pdf_pages(doc) -> str:
     """
     Rasterize each page of an open PyMuPDF document and run Tesseract OCR
     on it. Used when the PDF has no usable native text layer — i.e. it's a
     scanned/image-only invoice (Architecture Doc §7 edge case).
+
+    Relies on `tesseract` being resolvable on PATH (same approach as
+    app/workflow/legal_invoice_platform_agent.py's copy of this
+    function), rather than a hardcoded path — the previous hardcoded
+    path (`C:\\Program Files\\Tessaract-OCR\\tesseract.exe`) was
+    Windows-only and misspelled ("Tessaract"), so it silently never
+    worked even on a Windows machine with Tesseract actually installed
+    at the correct path.
     """
     import pytesseract
     from PIL import Image
-
-    pytesseract.pytesseract.tesseract_cmd = pytesseract_path
 
     page_texts = []
     for page in doc:
@@ -135,7 +134,14 @@ def extract_text_from_pdf(file_path: str) -> str:
     if not os.path.exists(file_path):
         return ""
 
-    is_pdf = file_path.lower().endswith(".pdf")
+    # file_path arrives as a pathlib.Path from the live API
+    # (app/api/invoices.py's _save_upload_to_disk returns a Path) — this
+    # function was dead code before the QA-pass fix that wired it into
+    # ingest_invoice (bug #7), so this .lower() call on a Path object
+    # (AttributeError: 'PosixPath' object has no attribute 'lower') was
+    # never actually exercised end-to-end until now. str() handles both
+    # a Path and a plain string.
+    is_pdf = str(file_path).lower().endswith(".pdf")
 
     if is_pdf:
         try:
@@ -516,8 +522,15 @@ def _log(state: InvoiceGraphState, message: str) -> None:
 
 
 def ingest_invoice(state: InvoiceGraphState) -> InvoiceGraphState:
-    state["raw_text"] = extract_text(state["file_path"])
-    print("raw_text ======>:", state["raw_text"])
+    # Fixed during QA pass (14 Aug 2026): this used to call extract_text()
+    # from invoice_pipeline.py, which has no OCR fallback — for a
+    # scanned/image-only PDF (no native text layer), it fell straight
+    # through to reading the raw PDF *file bytes* as text, feeding
+    # binary garbage into extraction and silently returning empty/
+    # "UNKNOWN" fields with no error. The real OCR fallback
+    # (extract_text_from_pdf, below in this file) already existed but
+    # was never wired into the pipeline — this now actually calls it.
+    state["raw_text"] = extract_text_from_pdf(state["file_path"])
     _log(state, "Invoice document ingested.")
     return state
 
@@ -702,47 +715,35 @@ def draw_graph():
         
         
 def call_run_invoice_graph(filepath, matter_id):
+    """
+    Entry point used by both POST /invoices/submit and run_graph.py.
 
+    Fixed during QA pass (14 Aug 2026):
+      - `db` was never closed — every call leaked a SQLite session.
+        Wrapped in try/finally so it's always closed, including on error.
+      - A nonexistent matter_id used to crash here with an unhandled
+        AttributeError (`matter.firm_id` when matter is None). The API
+        layer (app/api/invoices.py submit_invoice) now checks for this
+        before ever calling this function, but this raises a clear
+        ValueError too as defense-in-depth for any other caller
+        (run_graph.py, future code) that doesn't pre-check.
+    """
     from app.database.database import SessionLocal
     from app.models.matter import Matter
-    from app.models.firm import Firm
 
     db = SessionLocal()
+    try:
+        matter = db.get(Matter, matter_id)
+        if matter is None:
+            raise ValueError(f"Matter not found: {matter_id!r}")
 
-    # Seed firm/matter only if they don't already exist
-    # firm = db.get(Firm, 1)
-    # if firm is None:
-    #     firm = Firm(
-    #         firm_id=1,
-    #         name="Sample Outside Counsel LLP",
-    #         contact_email="contact@samplefirm.com",
-    #         status="active",
-    #     )
-    #     db.add(firm)
-    #     db.commit()
-
-    matter = db.get(Matter, matter_id)
-    # if matter is None:
-    #     matter = Matter(
-    #         firm_id=1,
-    #         matter_id=1,
-    #         name="Firm 1 Matter",
-    #         owner="Owner 1",
-    #         status="open",
-    #     )
-    #     db.add(matter)
-    #     db.commit()
-
-    # from pathlib import Path
-
-    # REPO_ROOT = Path(__file__).resolve().parents[3]
-    # TEST_INVOICE_PATH = REPO_ROOT / "legal_docs" / "test_invoice.pdf"
-
-    state = run_invoice_graph(
-        db,
-        file_path=filepath,
-        matter_id=matter_id,
-        firm_id=matter.firm_id,
-    )
-    print(state)
-    return state
+        state = run_invoice_graph(
+            db,
+            file_path=filepath,
+            matter_id=matter_id,
+            firm_id=matter.firm_id,
+        )
+        print(state)
+        return state
+    finally:
+        db.close()

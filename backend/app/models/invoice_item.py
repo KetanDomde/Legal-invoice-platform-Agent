@@ -1,18 +1,27 @@
 """
 LineItem model — owner: Bhushan (ERD: LINE_ITEM entity).
 
-This file previously existed but was empty (0 bytes).
-
-Fields match ERD.docx's LINE_ITEM table: line_item_id, invoice_id,
-timekeeper, hours, rate, amount — PLUS two extra columns (role,
-description) that are NOT in the ERD. See the note below for why.
+The real, active LineItem model lives in app/models/entities.py (single
+source of truth for every ORM model — see that file). This module used
+to have its own LineItem class body entirely commented out, so
+`from app.models.invoice_item import LineItem` raised ImportError —
+which broke app/database/base.py and, through it, every test in
+tests/test_api.py and tests/test_persistence.py (see QA findings bug
+#10). Fixed by making this a thin re-export, matching the pattern
+already used by app/models/matter.py, app/models/invoice.py, etc.,
+instead of a second, divergent definition of the same table.
 """
-from sqlalchemy import Column, Integer, String, Float, ForeignKey
-from sqlalchemy.orm import relationship
+from app.models.entities import LineItem
 
-from app.database.database import Base
+__all__ = ["LineItem"]
 
-
+# --- Original commented-out class body, kept for reference only ---
+# Fields match ERD.docx's LINE_ITEM table: line_item_id, invoice_id,
+# timekeeper, hours, rate, amount — PLUS two extra columns (role,
+# description) that are NOT in the ERD and are NOT on the real
+# entities.LineItem model either (see QA findings bug #3 — persisting
+# code never actually forwards these two fields today).
+#
 # class LineItem(Base):
 #     __tablename__ = "line_items"
 

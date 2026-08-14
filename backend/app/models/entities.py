@@ -26,7 +26,7 @@ class Firm(Base):
 class Matter(Base):
     __tablename__ = "matters"
 
-    matter_id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    matter_id: Mapped[str] = mapped_column(String(100), primary_key=True, index=True)
     firm_id: Mapped[int] = mapped_column(ForeignKey("firms.firm_id"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     owner: Mapped[str] = mapped_column(String(255), nullable=False)

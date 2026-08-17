@@ -126,14 +126,53 @@ def inject_base_css():
             }}
 
             .kv-sidebar-card {{
-                background: {LIGHT};
+                background: rgba(255,255,255,.1);
                 border-radius: 12px;
                 padding: 14px 16px;
                 margin-bottom: 10px;
+                color: #EAF0FF;
             }}
-            [data-testid="stSidebar"] {{
-                background-color: #FBFBFE;
+            .kv-sidebar-card small {{ color: rgba(234,240,255,.72) !important; }}
+
+            /* Workbench sidebar — navy gradient, matches the rest of this
+               engagement's brand deliverables (docHelpers.js / decks). */
+            section[data-testid="stSidebar"] {{
+                background: linear-gradient(180deg, {NAVY} 0%, #0a0640 100%);
             }}
+            section[data-testid="stSidebar"] * {{ color: #EAF0FF !important; }}
+            section[data-testid="stSidebar"] hr {{ border-color: rgba(255,255,255,.18) !important; }}
+            /* Ten workbench pages overflow Streamlit's default sidebar-nav
+               height and collapse behind a "View more" toggle — expand it
+               so the full flow is visible at a glance. */
+            div[data-testid="stSidebarNav"] {{ max-height: none !important; }}
+            div[data-testid="stSidebarNav"] > ul {{ max-height: none !important; }}
+            div[data-testid="stSidebarNavSeparator"] {{ display: none !important; }}
+            section[data-testid="stSidebar"] input, section[data-testid="stSidebar"] textarea {{
+                color: {NAVY} !important;
+            }}
+            section[data-testid="stSidebar"] .stButton>button {{
+                border-color: rgba(255,255,255,.35);
+                background: rgba(255,255,255,.08);
+            }}
+
+            /* Workbench building blocks (cards/badges/timeline/notices),
+               layered on top of the existing kv-* system above. */
+            .wb-badge {{
+                display:inline-flex; align-items:center; gap:6px; border-radius:999px;
+                padding:5px 11px; font-size:12px; font-weight:700; white-space:nowrap;
+            }}
+            .wb-notice {{
+                border-radius:14px; padding:13px 15px; border:1px solid #fed7aa;
+                background:#fff7ed; color:#9a3412; font-size:13px; font-weight:600; margin: 8px 0;
+            }}
+            .wb-notice.success {{ border-color:#bbf7d0; background:#f0fdf4; color:#166534; }}
+            .wb-chip {{
+                background:{LIGHT}; border:1px solid #dfe4ee; padding:6px 10px; border-radius:999px;
+                font-size:12px; font-weight:700; color:#4a5365; display:inline-block; margin:3px 3px 3px 0;
+            }}
+            .wb-kv {{ font-size: 14px; margin: 3px 0; }}
+            .wb-kv .k {{ color: {GREY}; display: inline-block; min-width: 160px; }}
+            .wb-kv .v {{ font-weight: 700; }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -186,3 +225,107 @@ def money(amount) -> str:
     if amount is None:
         return "—"
     return f"${amount:,.2f}"
+
+
+# ---------------------------------------------------------------------------
+# Workbench building blocks — cards/badges/timeline/notices in the same
+# visual language as render_banner()/status_badge() above, used across the
+# 10-screen intake -> workspace -> review -> admin flow.
+# ---------------------------------------------------------------------------
+
+WB_BADGE_STYLES = {
+    "green": ("#e8f8f1", "#087443"),
+    "blue": ("#e8efff", "#1746bb"),
+    "orange": ("#fff3e5", "#b45a00"),
+    "red": ("#fdecec", RED),
+    "purple": ("#f1e8ff", "#673ab7"),
+    "gray": ("#eef0f4", "#4c5568"),
+}
+
+
+def badge(text: str, color: str = "gray") -> str:
+    bg, fg = WB_BADGE_STYLES.get(color, WB_BADGE_STYLES["gray"])
+    return f'<span class="wb-badge" style="background:{bg};color:{fg}">{text}</span>'
+
+
+def notice(text: str, success: bool = False) -> None:
+    cls = "wb-notice success" if success else "wb-notice"
+    st.markdown(f'<div class="{cls}">{text}</div>', unsafe_allow_html=True)
+
+
+def chip(text: str) -> str:
+    return f'<span class="wb-chip">{text}</span>'
+
+
+def chips(items: list) -> None:
+    st.markdown("".join(chip(i) for i in items), unsafe_allow_html=True)
+
+
+def kv_row(label: str, value) -> None:
+    st.markdown(f'<div class="wb-kv"><span class="k">{label}</span><span class="v">{value}</span></div>', unsafe_allow_html=True)
+
+
+def page_header(number: int, title: str, subtitle: str, extra_badge: str | None = None) -> None:
+    left, right = st.columns([5, 2])
+    with left:
+        st.markdown(f"## {number}. {title}")
+        st.caption(subtitle)
+    with right:
+        if extra_badge:
+            st.markdown(f'<div style="text-align:right;padding-top:14px">{extra_badge}</div>', unsafe_allow_html=True)
+
+
+def metric_row(items: list) -> None:
+    """items: [(label, value), ...] — thin wrapper around kpi_tile in columns."""
+    cols = st.columns(len(items))
+    for col, (label, value) in zip(cols, items):
+        with col:
+            kpi_tile(label, value)
+
+
+def timeline(steps: list) -> None:
+    """steps: [(label, state)] where state is "done" | "active" | "pending" | "rejected"."""
+    state_colors = {"done": BLUE, "active": BLUE, "pending": "#dfe4ee", "rejected": RED}
+    cols = st.columns(len(steps))
+    for i, (label, state) in enumerate(steps):
+        color = state_colors.get(state, "#dfe4ee")
+        text_color = "#fff" if state in ("done", "active", "rejected") else "#6a7280"
+        label_color = BLUE if state == "active" else (RED if state == "rejected" else GREY)
+        weight = 800 if state in ("active", "rejected") else 500
+        with cols[i]:
+            st.markdown(
+                f"""
+                <div style="text-align:center">
+                  <div style="width:32px;height:32px;border-radius:50%;background:{color};color:{text_color};
+                              display:inline-grid;place-items:center;font-size:12px;font-weight:900;margin:0 auto">{i + 1}</div>
+                  <div style="font-size:11px;color:{label_color};margin-top:6px;font-weight:{weight};line-height:1.2">{label}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+
+def artifact_row(label: str, right_html: str) -> None:
+    st.markdown(
+        f'<div style="display:flex;justify-content:space-between;align-items:center;'
+        f'border:1px solid #ECEDF6;border-radius:12px;padding:10px 12px;margin-bottom:8px;'
+        f'background:#fbfcff;font-size:13px"><span>{label}</span><span>{right_html}</span></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def sidebar_brand() -> None:
+    st.sidebar.markdown(
+        """
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">
+          <div style="width:42px;height:42px;border-radius:12px;background:#fff;color:#020067;
+                      display:grid;place-items:center;font-weight:900">K</div>
+          <div>
+            <div style="font-weight:800;font-size:16px;line-height:1.15">Legal Invoice Platform</div>
+            <div style="opacity:.75;font-size:11px;margin-top:2px">Konverge AI &middot; Agent Workbench</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.sidebar.divider()

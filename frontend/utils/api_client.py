@@ -105,20 +105,43 @@ class APIClient:
             "matter_id": matter_id, "allocated_amt": allocated_amt, "threshold_pct": threshold_pct})
 
     # --- invoices -------------------------------------------------------
-    # Real pipeline endpoint (confirmed working — from Bhushan's test harness):
-    # POST /invoices/submit, multipart form: invoice_id, matter_id, file
-    # --- invoices -------------------------------------------------------
-    # Based on models/invoice.py: matter_id is a STRING FK, invoice_id is
-    # a system-generated int PK, invoice_no/dates/amount are extracted
-        # from the PDF server-side — not entered by the uploader.
-        
-    def submit_invoice(self, file, matter_no: str | None = None):
-            files = {"file": (file.name, file.getvalue(), file.type or "application/pdf")}
-            data = {"matter_no": matter_no} if matter_no else {}
-            return self._call("POST", "/invoices/submit", data=data, files=files, timeout=60)
-        
-        
-    def get_invoice(self, invoice_id: int):  # VERIFY: int PK now, not string
+    # Matter/firm are no longer supplied by the caller on submit — they're
+    # resolved (and auto-created if needed) server-side from matter_no/
+    # matter_name extracted straight off the invoice text. matter_no and
+    # firm_name here are optional manual overrides only, for when
+    # extraction can't find an identifier or you want to route a new
+    # matter to a specific firm. invoice_id is always server-generated.
+    def submit_invoice(self, file, matter_no: str | None = None, firm_name: str | None = None):
+        """
+        Upload a PDF/TXT to the extraction/validation pipeline. Creates a
+        NEW invoice. `file` is a Streamlit UploadedFile (has .name and
+        .getvalue()). Raises APIError(422) if no matter identifier could
+        be extracted and no matter_no override was supplied, or
+        APIError(409, inv_changes={...}) if it's a duplicate of an
+        existing invoice for the resolved matter.
+        """
+        files = {"file": (file.name, file.getvalue(), file.type or "application/pdf")}
+        data = {}
+        if matter_no:
+            data["matter_no"] = matter_no
+        if firm_name:
+            data["firm_name"] = firm_name
+        return self._call("POST", "/invoices/submit", data=data, files=files, timeout=60)
+
+    def update_invoice_file(self, invoice_id: int, matter_id, file, matter_name: str | None = None):
+        """
+        Re-extracts an EXISTING invoice from a corrected file (PUT). Always
+        routes the result back to pending_review, never auto-re-approves.
+        Unlike submit, this still takes an explicit numeric matter_id —
+        PUT hasn't been moved onto the auto-resolve-from-extraction path.
+        """
+        files = {"file": (file.name, file.getvalue(), file.type or "application/pdf")}
+        data = {"matter_id": str(matter_id)}
+        if matter_name:
+            data["matter_name"] = matter_name
+        return self._call("PUT", f"/invoices/{invoice_id}", data=data, files=files, timeout=60)
+
+    def get_invoice(self, invoice_id: int):
         return self._call("GET", f"/invoices/{invoice_id}")
 
     def list_invoices(self, matter_id=None, firm_id=None):
@@ -143,6 +166,9 @@ class APIClient:
     # --- review workflow -----------------------------------------------------
     def review_queue(self):
         return self._call("GET", "/review/queue")
+
+    def get_review_invoice(self, invoice_id: int):
+        return self._call("GET", f"/review/{invoice_id}")
 
     def approve(self, invoice_id, notes: str | None = None):
         return self._call("POST", f"/review/{invoice_id}/approve", params={"notes": notes})

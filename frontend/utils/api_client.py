@@ -98,16 +98,14 @@ class APIClient:
     # --- invoices -------------------------------------------------------
     # Based on models/invoice.py: matter_id is a STRING FK, invoice_id is
     # a system-generated int PK, invoice_no/dates/amount are extracted
-    # from the PDF server-side — not entered by the uploader.
-    def submit_invoice(self, matter_id: str, file):
-        """
-        Upload a PDF to the extraction/validation pipeline.
-        `file` is a Streamlit UploadedFile (has .name and .getvalue()).
-        """
-        files = {"file": (file.name, file.getvalue(), file.type or "application/pdf")}
-        data = {"matter_id": matter_id}  # VERIFY: field name + that invoice_id is NOT sent
-        return self._call("POST", "/invoices/submit", data=data, files=files, timeout=60)
-
+        # from the PDF server-side — not entered by the uploader.
+        
+    def submit_invoice(self, file, matter_no: str | None = None):
+            files = {"file": (file.name, file.getvalue(), file.type or "application/pdf")}
+            data = {"matter_no": matter_no} if matter_no else {}
+            return self._call("POST", "/invoices/submit", data=data, files=files, timeout=60)
+        
+        
     def get_invoice(self, invoice_id: int):  # VERIFY: int PK now, not string
         return self._call("GET", f"/invoices/{invoice_id}")
 

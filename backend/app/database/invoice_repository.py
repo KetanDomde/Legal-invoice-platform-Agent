@@ -11,12 +11,77 @@ This file's functions reflect that:
 """
 from __future__ import annotations
 
+from datetime import date, datetime
 from sqlalchemy.exc import IntegrityError
 
 from app.database.database import SessionLocal
 from app.models.invoice import Invoice
 from app.models import LineItem
 from app.models.matter import Matter
+
+from app.models.firm import Firm  # add to your existing imports at the top
+
+UNASSIGNED_FIRM_NAME = "Unassigned Firm (Auto)"
+
+
+def get_or_create_unassigned_firm(db) -> "Firm":
+    """Fallback firm for matters auto-created from invoice extraction
+    when the PDF has no extractable firm identity. Reassign the real
+    firm later via PATCH /matters/{id}."""
+    firm = db.query(Firm).filter(Firm.name == UNASSIGNED_FIRM_NAME).first()
+    if firm is None:
+        firm = Firm(name=UNASSIGNED_FIRM_NAME, status="active")
+        db.add(firm)
+        db.flush()
+    return firm
+
+
+def get_or_create_matter(db, matter_no: str, matter_name: str | None = None):
+    """
+    Resolves a Matter by its extracted matter_no. Auto-creates one under
+    the fallback Unassigned Firm if it doesn't exist yet, so invoice
+    upload never blocks on a missing matter.
+    """
+    matter_no = (matter_no or "").strip()
+    if not matter_no:
+        return None
+
+    matter = db.query(Matter).filter(Matter.matter_no == matter_no).first()
+    if matter is not None:
+        return matter
+
+    firm = get_or_create_unassigned_firm(db)
+    matter = Matter(
+        matter_no=matter_no,
+        firm_id=firm.firm_id,
+        name=matter_name or f"Auto-created from invoice ({matter_no})",
+        owner="Unassigned",
+        status="open",
+    )
+    db.add(matter)
+    db.flush()
+    return matter
+
+
+def _coerce_date(value):
+    """
+    extract_with_groq_call() / extract_invoice_fields_mock() (in
+    app/workflow/legal_invoice_platform_agent.py) return invoice_date as
+    a plain "YYYY-MM-DD" string, not a date object. Passing that string
+    straight into Invoice(invoice_date=...) used to raise
+    `sqlalchemy.exc.StatementError: SQLite Date type only accepts Python
+    date objects as input` on every insert/update that had a date at
+    all. Already-a-date and None both pass through unchanged; an
+    unparseable string returns None rather than crashing (same
+    "don't invent data, flag for review instead" philosophy as
+    extract_text_from_pdf's empty-string return).
+    """
+    if not value or isinstance(value, date):
+        return value
+    try:
+        return datetime.strptime(str(value), "%Y-%m-%d").date()
+    except ValueError:
+        return None
 
 
 class InvoiceAlreadyExistsError(Exception):
@@ -106,17 +171,28 @@ def get_firm_id_for_matter(matter_id: str):
 
 def _apply_line_items(db, invoice_id: int, line_items_data: list) -> None:
     """Shared by insert and update — adds LineItem rows for an invoice
-    that's already been added/flushed to the session."""
+    that's already been added/flushed to the session.
+
+    FIXED during QA pass (14 Aug 2026): previously passed line_type,
+    role, and description to LineItem(...) — none of those are columns
+    on the real LineItem model in app/models/entities.py. SQLAlchemy's
+    generated __init__ raises TypeError on an unrecognized keyword
+    argument, so this crashed on every invoice that had any line items
+    at all (i.e. almost every real submission) — this is the deeper
+    cause behind PUT /invoices/{invoice_id} still failing even once its
+    ModuleNotFoundError (QA findings bug #6) is fixed. Extraction still
+    produces line_type/role/description (see extract_with_groq_call in
+    app/workflow/legal_invoice_platform_agent.py) — they're just not
+    persisted today. Flag at standup if the schema should be extended to
+    keep them rather than dropping them here.
+    """
     for li in (line_items_data or []):
         db.add(LineItem(
             invoice_id=invoice_id,
-            line_type=li.get("line_type") or ("expense" if not li.get("timekeeper") else "fee"),
             timekeeper=li.get("timekeeper"),
             hours=li.get("hours"),
             rate=li.get("rate"),
             amount=li.get("amount", 0.0),
-            role=li.get("role"),
-            description=li.get("description"),
         ))
 
 
@@ -144,14 +220,16 @@ def insert_invoice_with_line_items(
         raise InvoiceAlreadyExistsError(invoice_no, matter_id)
 
     try:
+        # billing_period_start/end and matter_name removed from this
+        # constructor call — same reason as _apply_line_items above:
+        # none of them are real columns on Invoice (entities.py), and
+        # SQLAlchemy's generated __init__ raises TypeError on an
+        # unrecognized keyword rather than ignoring it.
         invoice = Invoice(
             matter_id=matter_id,
             firm_id=firm_id,
             invoice_no=invoice_no,
-            invoice_date=extracted.get("invoice_date") or None,
-            billing_period_start=extracted.get("billing_period_start") or None,
-            billing_period_end=extracted.get("billing_period_end") or None,
-            matter_name=extracted.get("matter_name") or None,
+            invoice_date=_coerce_date(extracted.get("invoice_date")),
             total_amount=extracted.get("total_amount", 0.0),
             status=status,
             confidence_score=confidence_score,
@@ -197,13 +275,18 @@ def update_invoice_with_line_items(
         if invoice is None:
             raise InvoiceNotFoundError(invoice_id)
 
+        # matter_name/billing_period_start/billing_period_end removed:
+        # none of these are real columns on Invoice (entities.py). The
+        # old code read `invoice.matter_name` as a fallback default
+        # (`extracted.get(...) or invoice.matter_name`) — reading an
+        # attribute that was never declared as a mapped column raises
+        # AttributeError on a SQLAlchemy declarative instance, so this
+        # crashed immediately on every PUT, before line items were even
+        # touched.
         invoice.matter_id = matter_id
         invoice.firm_id = firm_id
-        invoice.matter_name = extracted.get("matter_name") or invoice.matter_name
         invoice.invoice_no = extracted.get("invoice_no") or invoice.invoice_no
-        invoice.invoice_date = extracted.get("invoice_date") or invoice.invoice_date
-        invoice.billing_period_start = extracted.get("billing_period_start") or invoice.billing_period_start
-        invoice.billing_period_end = extracted.get("billing_period_end") or invoice.billing_period_end
+        invoice.invoice_date = _coerce_date(extracted.get("invoice_date")) or invoice.invoice_date
         invoice.total_amount = extracted.get("total_amount", invoice.total_amount)
         invoice.status = status
         invoice.confidence_score = confidence_score

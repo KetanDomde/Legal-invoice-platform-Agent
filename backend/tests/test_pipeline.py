@@ -13,7 +13,7 @@ import pytest
 
 from app.database.invoice_repository import InvoiceAlreadyExistsError
 from app.models.invoice import Invoice
-from app.workflows.legal_invoice_platform_agent import run_pipeline
+from app.workflow.legal_invoice_platform_agent import run_pipeline
 
 
 def _unique_matter_id(prefix="M-TEST"):

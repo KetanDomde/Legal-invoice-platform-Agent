@@ -11,13 +11,13 @@ from app.api.review import router as review_router
 from app.api.users import router as users_router
 from app.api.invoices import router as invoice_router
 from app.api.validation import router as validation_router
-from app.database.init_db import init_db
-
+from app.database.init_db import init_db,delete_db
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
     yield
+    delete_db()
 
 
 app = FastAPI(

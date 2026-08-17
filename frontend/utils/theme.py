@@ -19,6 +19,7 @@ RED = "#D64545"
 
 STATUS_COLORS = {
     "submitted": GREY,
+    "pending_review": BLUE,
     "under_review": BLUE,
     "clarification_requested": "#B98900",
     "approved": GREEN,

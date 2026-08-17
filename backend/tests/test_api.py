@@ -151,7 +151,10 @@ class TestDuplicateSubmission:
                 files={"file": ("sample_invoice_native.pdf", f, "application/pdf")},
             )
         assert second.status_code == 409
-        assert "already exists" in second.json()["detail"]
+        body = second.json()
+        assert "already exists" in body["detail"]
+        assert "inv_changes" in body
+        assert isinstance(body["inv_changes"], dict)
 
     def test_duplicate_rejection_does_not_create_a_second_row(self, client, auth_ctx, sample_native_pdf):
         matter_id = auth_ctx["make_matter"]()

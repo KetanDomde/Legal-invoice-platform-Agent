@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from app.models import entities
 
 from app.services.invoice import add_audit_log, validate_invoice
+from app.core.config import settings
 
 from app.workflow.approval_service import (
     auto_approve_invoice,
@@ -77,6 +78,7 @@ class InvoiceGraphState(TypedDict, total=False):
     db: Session
     file_path: str
     matter_no_override: str | None   # NEW
+    firm_name: str | None            # NEW — user-supplied, used when creating a new matter's firm
     matter_id: int
     firm_id: int
     raw_text: str
@@ -492,7 +494,7 @@ def extract_with_groq_call(raw_text: str) -> tuple[dict, float]:
     for attempt in range(1, GROQ_MAX_RETRIES + 1):
         try:
             resp = client.chat.completions.create(
-                model=os.getenv("GROQ_MODEL", "llama-3.1-8b-instant"),
+                model=settings.GROQ_MODEL,
                 messages=[
                     {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
@@ -536,7 +538,9 @@ def resolve_matter(state: InvoiceGraphState) -> InvoiceGraphState:
         _log(state, "No matter_no could be extracted from the invoice; cannot resolve a matter.")
         return state
 
-    matter = get_or_create_matter(state["db"], matter_no, extracted.get("matter_name"))
+    matter = get_or_create_matter(
+        state["db"], matter_no, extracted.get("matter_name"), firm_name=state.get("firm_name")
+    )
     state["matter_id"] = matter.matter_id
     state["firm_id"] = matter.firm_id
     _log(state, f"Resolved matter_no={matter_no!r} to matter_id={matter.matter_id} (firm_id={matter.firm_id}).")
@@ -746,6 +750,7 @@ def run_invoice_graph(
     *,
     file_path: str,
     matter_no_override: str | None = None,
+    firm_name: str | None = None,
 ) -> InvoiceGraphState:
     graph = build_invoice_graph()
     return graph.invoke(
@@ -753,6 +758,7 @@ def run_invoice_graph(
             "db": db,
             "file_path": file_path,
             "matter_no_override": matter_no_override,
+            "firm_name": firm_name,
             "audit_trail": [],
         }
     )
@@ -810,12 +816,14 @@ def draw_graph():
 #     )
 #     print(state)
 #     return state
-def call_run_invoice_graph(filepath, matter_no_override: str | None = None):
+def call_run_invoice_graph(filepath, matter_no_override: str | None = None, firm_name: str | None = None):
     from app.database.database import SessionLocal
 
     db = SessionLocal()
     try:
-        state = run_invoice_graph(db, file_path=filepath, matter_no_override=matter_no_override)
+        state = run_invoice_graph(
+            db, file_path=filepath, matter_no_override=matter_no_override, firm_name=firm_name
+        )
         db.commit()
         print(state)
         return state

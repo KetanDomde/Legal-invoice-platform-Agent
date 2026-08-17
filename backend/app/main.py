@@ -1,6 +1,8 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from typing import Any
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.admin import router as admin_router
@@ -18,6 +20,7 @@ async def lifespan(app: FastAPI):
     init_db()
     yield
     delete_db()
+
 
 
 app = FastAPI(
@@ -53,3 +56,4 @@ def root():
 @app.get("/health", tags=["Health"])
 def health():
     return {"status": "ok"}
+

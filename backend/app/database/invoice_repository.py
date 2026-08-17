@@ -36,11 +36,29 @@ def get_or_create_unassigned_firm(db) -> "Firm":
     return firm
 
 
-def get_or_create_matter(db, matter_no: str, matter_name: str | None = None):
+def get_or_create_firm_by_name(db, firm_name: str) -> "Firm":
+    """Finds a Firm by its user-supplied name, creating it if needed.
+
+    Lookup is case-insensitive so "Acme Law" and "acme law" resolve to
+    the same firm rather than creating duplicates.
     """
-    Resolves a Matter by its extracted matter_no. Auto-creates one under
-    the fallback Unassigned Firm if it doesn't exist yet, so invoice
-    upload never blocks on a missing matter.
+    firm_name = firm_name.strip()
+    firm = db.query(Firm).filter(Firm.name.ilike(firm_name)).first()
+    if firm is None:
+        firm = Firm(name=firm_name, status="active")
+        db.add(firm)
+        db.flush()
+    return firm
+
+
+def get_or_create_matter(db, matter_no: str, matter_name: str | None = None, firm_name: str | None = None):
+    """
+    Resolves a Matter by its extracted matter_no. Auto-creates one if it
+    doesn't exist yet, so invoice upload never blocks on a missing matter.
+
+    The new matter's firm is resolved from the user-supplied firm_name
+    (found-or-created) when provided; otherwise it falls back to the
+    Unassigned Firm placeholder, same as before.
     """
     matter_no = (matter_no or "").strip()
     if not matter_no:
@@ -50,7 +68,8 @@ def get_or_create_matter(db, matter_no: str, matter_name: str | None = None):
     if matter is not None:
         return matter
 
-    firm = get_or_create_unassigned_firm(db)
+    firm_name = (firm_name or "").strip()
+    firm = get_or_create_firm_by_name(db, firm_name) if firm_name else get_or_create_unassigned_firm(db)
     matter = Matter(
         matter_no=matter_no,
         firm_id=firm.firm_id,
@@ -89,10 +108,13 @@ class InvoiceAlreadyExistsError(Exception):
     same invoice_no and matter_id already exists.
     Distinct from a generic DB error so the API layer can turn this into
     a clean 409 instead of a 500."""
-    def __init__(self, invoice_no: str, matter_id: str):
+    def __init__(self, invoice_no: str, matter_id: str, inv_changes: dict | None = None):
         self.invoice_no = invoice_no
         self.matter_id = matter_id
-        super().__init__(f"Invoice with invoice_no={invoice_no!r} already exists for matter_id={matter_id!r}")
+        self.inv_changes = inv_changes
+        super().__init__(
+            f"Invoice with invoice_no={invoice_no!r} already exists for matter_id={matter_id!r}"
+        )
 
 
 class InvoiceNotFoundError(Exception):

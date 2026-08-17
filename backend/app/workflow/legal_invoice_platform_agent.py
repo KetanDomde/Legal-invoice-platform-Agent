@@ -40,6 +40,7 @@ from typing import Optional, TypedDict
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, START, END
 from app.database.invoice_repository import InvoiceAlreadyExistsError
+from app.core.config import settings
 
 # --- Path anchoring -----------------------------------------------------
 # Everything below is resolved relative to THIS FILE, not the current
@@ -556,7 +557,7 @@ def extract_with_groq_call(raw_text: str) -> tuple[dict, float]:
     for attempt in range(1, GROQ_MAX_RETRIES + 1):
         try:
             resp = client.chat.completions.create(
-                model=os.getenv("GROQ_MODEL", "llama-3.1-8b-instant"),
+                model=settings.GROQ_MODEL,
                 messages=[
                     {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},

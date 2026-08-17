@@ -36,6 +36,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session, joinedload
 from app.core.config import settings
 
@@ -89,15 +90,31 @@ def _normalize_matter_id(matter_id: str) -> str:
 async def submit_invoice(
     file: UploadFile = File(...),
     matter_no: str | None = Form(None, description="Optional manual override — normally extracted from the PDF."),
+    firm_name: str | None = Form(
+        None,
+        description=(
+            "User-supplied firm name. Used to find-or-create the Firm a "
+            "newly-created matter belongs to; the matter itself is still "
+            "created from the invoice's extracted matter_no/matter_name. "
+            "Falls back to an auto-created 'Unassigned Firm' if omitted."
+        ),
+    ),
     current_user: User = Depends(get_current_user),
 ):
     content = await file.read()
     saved_path = _save_upload_to_disk(file, content)
 
     try:
-        final_state = call_run_invoice_graph(saved_path, matter_no_override=matter_no)
+        final_state = call_run_invoice_graph(saved_path, matter_no_override=matter_no, firm_name=firm_name)
     except InvoiceAlreadyExistsError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        print(e)
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": str(e),
+                "inv_changes": getattr(e, "inv_changes", None) or {},
+            },
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Pipeline failed: {e}")
 

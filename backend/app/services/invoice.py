@@ -6,6 +6,10 @@ from sqlalchemy.orm import Session
 from app.models import Alert, AuditLog, Budget, BudgetLedger, Invoice
 from app.models import User
 
+from app.schemas.invoice_extraction import ExtractedInvoice
+from datetime import datetime
+from typing import Any
+
 
 CONFIDENCE_THRESHOLD = 0.85
 AUTO_APPROVE = "auto_approved"
@@ -69,7 +73,8 @@ def find_duplicate_invoice(
     query = db.query(Invoice).filter(
         Invoice.firm_id == firm_id,
         Invoice.invoice_no == invoice_no,
-        Invoice.total_amount == total_amount,
+        # removing amount for finding duplicate
+        # Invoice.total_amount == total_amount, 
     )
     if exclude_invoice_id is not None:
         query = query.filter(Invoice.invoice_id != exclude_invoice_id)
@@ -331,3 +336,82 @@ def _status_note(old_status: str, new_status: str, reason: str | None = None) ->
     if reason:
         note += f" Reason: {reason}"
     return note
+
+
+def get_duplicate_invoice(inv: Invoice) -> ExtractedInvoice | None:
+    return ExtractedInvoice.model_validate(inv)
+
+
+def diff_invoices(
+    original: ExtractedInvoice, duplicate: ExtractedInvoice
+) -> dict[str, Any]:
+    """Compares two ExtractedInvoice instances and returns a structured diff
+
+    containing only the changed fields with their original and modified values.
+    """
+    diff: dict[str, Any] = {}
+
+    # 1. Compare top-level scalar fields
+    scalar_fields = ["invoice_no", "invoice_date", "total_amount"]
+    for field in scalar_fields:
+        orig_val = getattr(original, field)
+        dupe_val = getattr(duplicate, field)
+        if orig_val != dupe_val:
+            diff[field] = {
+                "changed": True,
+                "original": orig_val,
+                "duplicate": dupe_val,
+            }
+
+    # 2. Compare line items
+    orig_items = original.line_items
+    dupe_items = duplicate.line_items
+    line_item_diffs = []
+
+    max_len = max(len(orig_items), len(dupe_items))
+    line_item_fields = ["timekeeper", "hours", "rate", "amount"]
+
+    for i in range(max_len):
+        # Case A: Item present in both
+        if i < len(orig_items) and i < len(dupe_items):
+            item_orig = orig_items[i]
+            item_dupe = dupe_items[i]
+            item_changes = {}
+
+            for field in line_item_fields:
+                val_orig = getattr(item_orig, field)
+                val_dupe = getattr(item_dupe, field)
+                if val_orig != val_dupe:
+                    item_changes[field] = {
+                        "changed": True,
+                        "original": val_orig,
+                        "duplicate": val_dupe,
+                    }
+
+            if item_changes:
+                line_item_diffs.append({"index": i, "changes": item_changes})
+
+        # Case B: Item deleted in duplicate
+        elif i < len(orig_items):
+            line_item_diffs.append(
+                {
+                    "index": i,
+                    "status": "removed",
+                    "original": orig_items[i].model_dump(),
+                }
+            )
+
+        # Case C: Item added in duplicate
+        else:
+            line_item_diffs.append(
+                {
+                    "index": i,
+                    "status": "added",
+                    "duplicate": dupe_items[i].model_dump(),
+                }
+            )
+
+    if line_item_diffs:
+        diff["line_items"] = line_item_diffs
+
+    return diff

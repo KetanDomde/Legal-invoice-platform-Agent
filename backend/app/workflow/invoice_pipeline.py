@@ -13,7 +13,8 @@ from sqlalchemy.orm import Session
 from app.database.invoice_repository import InvoiceAlreadyExistsError
 from app.models import Invoice, LineItem, Matter, Firm
 from app.schemas.invoice_extraction import ExtractedInvoice
-from app.services.invoice import validate_invoice
+from app.services.invoice import validate_invoice, get_duplicate_invoice, diff_invoices, find_duplicate_invoice
+from app.core.config import settings
 
 
 def extract_text(file_path: str) -> str:
@@ -79,7 +80,7 @@ def extract_invoice_fields(raw_text: str) -> tuple[dict, float]:
     schema = ExtractedInvoice.model_json_schema()
     
     response = client.chat.completions.create(
-        model=os.getenv("GROQ_MODEL", "llama-3.1-8b-instant"),
+        model=settings.GROQ_MODEL,
         messages=[
             {
                 "role": "system",
@@ -169,8 +170,23 @@ def persist_extracted_invoice(
         # raw, unhandled IntegrityError all the way up to a bare 500 —
         # now it's a typed, catchable error the API layer turns into a
         # clean 409 (see app/api/invoices.py submit_invoice).
+        # Must rollback BEFORE querying again — the session is left in an
+        # aborted state after a failed flush, so any query on it (e.g.
+        # find_duplicate_invoice below) would raise PendingRollbackError.
         db.rollback()
-        raise InvoiceAlreadyExistsError(invoice_no=parsed.invoice_no, matter_id=str(matter_id)) from e
+        org_inv = find_duplicate_invoice(
+            db,
+            firm_id=firm_id,
+            invoice_no=parsed.invoice_no,
+            total_amount=float(parsed.total_amount or 0),
+        )
+        org_inv = get_duplicate_invoice(org_inv)
+        inv_changes = diff_invoices(org_inv, parsed) if org_inv is not None else {}
+        raise InvoiceAlreadyExistsError(
+            invoice_no=parsed.invoice_no,
+            matter_id=str(matter_id),
+            inv_changes=inv_changes,
+        ) from e
     return invoice
 
 

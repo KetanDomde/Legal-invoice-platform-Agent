@@ -3,6 +3,7 @@ import streamlit as st
 
 from utils.theme import inject_base_css, render_banner, status_badge, money
 from utils.api_client import get_client, require_login, APIError
+from utils.submit_result import render_persisted_submit_result, render_persisted_submit_error, RESULT_KEY, ERROR_KEY
 
 st.set_page_config(page_title="Invoices | Konverge", page_icon="🧾", layout="wide")
 inject_base_css()
@@ -20,41 +21,35 @@ except APIError as e:
 
 # --- Upload -----------------------------------------------------------
 if user["role"] in ("admin", "editor"):
+    render_persisted_submit_result()
+    render_persisted_submit_error()
+
     with st.expander("📤 Upload invoice for processing", expanded=False):
-        if not matters:
-            st.info("No matters available yet — create one on the Firms & Matters page first.")
-        else:
-            # matter_id is a string per the model, not int — don't cast it
-            matter_lookup = {f"{m['name']} (Matter #{m['matter_id']})": m["matter_id"] for m in matters}
-            matter_label = st.selectbox("Matter", list(matter_lookup.keys()))
-            uploaded_file = st.file_uploader("Invoice PDF", type=["pdf"])
+        uploaded_file = st.file_uploader("Invoice PDF", type=["pdf"])
 
-            can_submit = uploaded_file is not None
-            if st.button("Submit invoice", type="primary", disabled=not can_submit):
-                matter_id = matter_lookup[matter_label]
-                with st.spinner("Extracting and validating..."):
-                    try:
-                        result = client.submit_invoice(uploaded_file, matter_no=None)
-                    except APIError as e:
-                        if e.status_code == 409:
-                            st.error(f"🚫 Duplicate invoice: {e.detail}")
-                        elif e.status_code == 422:
-                            st.error(f"Extraction/validation failed: {e.detail}")
-                        else:
-                            st.error(f"API error {e.status_code}: {e.detail}")
-                        result = None
+        can_submit = uploaded_file is not None
+        if st.button("Submit invoice", type="primary", disabled=not can_submit):
+            with st.spinner("Extracting and validating..."):
+                try:
+                    result = client.submit_invoice(uploaded_file)
+                except APIError as e:
+                    if e.status_code == 409:
+                        st.session_state[ERROR_KEY] = {
+                            "label": "Duplicate invoice",
+                            "detail": e.detail,
+                            "inv_changes": getattr(e, "inv_changes", None),
+                        }
+                    elif e.status_code == 422:
+                        st.error(f"Extraction/validation failed: {e.detail}")
+                    else:
+                        st.error(f"API error {e.status_code}: {e.detail}")
+                    result = None
 
-                if result is not None:
-                    st.success(
-                        f"Invoice #{result.get('invoice_id', '—')} "
-                        f"({result.get('invoice_no', 'no number extracted')}) — "
-                        f"status: {result.get('status', 'submitted')}"
-                    )
-                    conf = result.get("confidence_score")
-                    if conf is not None:
-                        st.caption(f"Extraction confidence: {conf:.0%}")
-                    st.json(result)  # VERIFY: whether response is the invoice row, or wraps it as {"extracted": ..., "audit_trail": ...}
-                    st.rerun()
+            if result is not None:
+                st.session_state[RESULT_KEY] = result
+                st.rerun()
+            elif ERROR_KEY in st.session_state:
+                st.rerun()
 else:
     st.caption("Viewer role: read-only. Ask an Editor or Admin to upload a new invoice.")
 

@@ -2,6 +2,7 @@ import streamlit as st
 
 from utils.theme import inject_base_css, render_banner, role_badge, kpi_tile, money
 from utils.api_client import get_client, APIError, DEFAULT_BASE_URL
+from utils.submit_result import render_persisted_submit_result, render_persisted_submit_error, RESULT_KEY, ERROR_KEY
 
 st.set_page_config(page_title="Konverge | Legal Invoice Platform", page_icon="⚖️", layout="wide")
 inject_base_css()
@@ -45,6 +46,9 @@ render_banner(
 )
 
 if not st.session_state.get("token"):
+    if st.session_state.pop("session_expired", False):
+        st.info("Your session has expired. Please log in again.")
+
     left, mid, right = st.columns([1, 1.1, 1])
     with mid:
         with st.container(border=True):
@@ -98,26 +102,24 @@ st.markdown("&nbsp;")
 
 # --- Upload Invoice: wired to the real, confirmed-working pipeline endpoint ---
 if user["role"] in ("admin", "editor"):
-    with st.expander("📤 Submit Invoice for Processing", expanded=False):
-        col1, col2 = st.columns(2)
-        with col1:
-            invoice_id = st.text_input(
-                "Invoice ID *", placeholder="e.g. INV-2026-001",
-                help="Required, alphanumeric. This IS the invoice's identity — never auto-generated.",
-            )
-        with col2:
-            matter_id = st.number_input("Matter ID *", min_value=1, value=1, step=1)
+    render_persisted_submit_result()
+    render_persisted_submit_error()
 
+    with st.expander("📤 Submit Invoice for Processing", expanded=False):
         uploaded_file = st.file_uploader("Invoice file", type=["pdf", "txt"])
 
-        can_submit = bool(invoice_id.strip()) and uploaded_file is not None
+        can_submit = uploaded_file is not None
         if st.button("Submit invoice", type="primary", disabled=not can_submit):
             with st.spinner("Extracting, validating, and persisting..."):
                 try:
-                    result = client.submit_invoice(invoice_id.strip(), int(matter_id), uploaded_file)
+                    result = client.submit_invoice(uploaded_file)
                 except APIError as e:
                     if e.status_code == 409:
-                        st.error(f"🚫 Duplicate: {e.detail}")
+                        st.session_state[ERROR_KEY] = {
+                            "label": "Duplicate",
+                            "detail": e.detail,
+                            "inv_changes": getattr(e, "inv_changes", None),
+                        }
                     elif e.status_code == 422:
                         st.error(f"Invalid request: {e.detail}")
                     else:
@@ -125,28 +127,9 @@ if user["role"] in ("admin", "editor"):
                     result = None
 
             if result is not None:
-                st.success(f"Done — invoice_id={result['invoice_id']}, status={result['final_status']}")
-                if result.get("warning"):
-                    st.warning(f"⚠️ {result['warning']}")
-
-                m1, m2 = st.columns(2)
-                m1.metric(
-                    "Confidence",
-                    f"{result['confidence_score']:.2f}" if result.get("confidence_score") is not None else "—",
-                )
-                m2.metric("Status", result["final_status"])
-
-                st.write("**Extracted fields**")
-                st.json(result["extracted"])
-
-                if result["extracted"].get("line_items"):
-                    st.write("**Line items**")
-                    st.table(result["extracted"]["line_items"])
-
-                with st.expander("Full audit trail"):
-                    for line in result["audit_trail"]:
-                        st.text(line)
-
+                st.session_state[RESULT_KEY] = result
+                st.rerun()
+            elif ERROR_KEY in st.session_state:
                 st.rerun()
 
 st.markdown("Use the pages in the sidebar to navigate: **Dashboard**, **Invoices**, **Review Queue**, "

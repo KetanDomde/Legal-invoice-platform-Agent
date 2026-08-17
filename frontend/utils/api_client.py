@@ -12,10 +12,14 @@ DEFAULT_BASE_URL = "http://localhost:8000"
 
 
 class APIError(Exception):
-    def __init__(self, status_code: int, detail: str):
+    def __init__(self, status_code: int, detail: str, inv_changes: dict|None=None):
         self.status_code = status_code
         self.detail = detail
-        super().__init__(f"{status_code}: {detail}")
+        self.inv_changes = inv_changes
+        super().__init__(
+            f"{status_code}: {detail}"
+            f"{inv_changes}"
+        )
 
 
 class APIClient:
@@ -37,12 +41,20 @@ class APIClient:
             )
         except requests.exceptions.ConnectionError:
             raise APIError(0, f"Can't reach the API at {self.base_url}. Is the backend running?")
+        # A 401 while a bearer token was sent means that token is invalid/expired
+        # (as opposed to /auth/login's own 401 for bad credentials, sent with no
+        # token at all) — bounce back to the login page instead of leaving the
+        # user stuck on a page full of failed requests.
+        if resp.status_code == 401 and self.token:
+            _handle_session_expired()
         if resp.status_code >= 400:
             try:
-                detail = resp.json().get("detail", resp.text)
+                payload = resp.json()
             except Exception:
-                detail = resp.text
-            raise APIError(resp.status_code, str(detail))
+                payload = {}
+            detail = payload.get("detail", resp.text)
+            inv_changes = payload.get("inv_changes")
+            raise APIError(resp.status_code, str(detail), inv_changes)
         if resp.status_code == 204 or not resp.content:
             return None
         return resp.json()
@@ -157,11 +169,18 @@ def get_client() -> APIClient:
     return APIClient(base_url, token)
 
 
+def _handle_session_expired():
+    st.session_state.pop("token", None)
+    st.session_state.pop("user", None)
+    st.session_state["session_expired"] = True
+    st.switch_page("Home.py")
+
+
 def require_login():
-    """Call at the top of every page except Home. Stops the page if not logged in."""
+    """Call at the top of every page except Home. Redirects to Home (the
+    login form) if not logged in, instead of stopping mid-page."""
     if not st.session_state.get("token") or not st.session_state.get("user"):
-        st.warning("Please log in from the **Home** page first.")
-        st.stop()
+        st.switch_page("Home.py")
 
 
 def require_role(*roles):

@@ -1,5 +1,3 @@
-
-
 from app.database.database import SessionLocal, engine, Base
 from app.models.user import User
 from app.models.firm import Firm
@@ -13,20 +11,27 @@ def init_db():
 
     db = SessionLocal()
     try:
-        # --- Admin user ---
-        existing = db.query(User).filter(User.email == "admin@test.com").first()
-        if existing is None:
-            admin = User(
-                name="Admin",
-                email="admin@test.com",
-                password_hash=hash_password("admin123"),
-                role="admin",
-            )
-            db.add(admin)
-            db.commit()
-            print("Admin user created.")
-        else:
-            print("Admin already exists.")
+        # --- Users (admin / editor / viewer) ---
+        users_to_seed = [
+            {"name": "Admin", "email": "admin@test.com", "password": "admin123", "role": "admin"},
+            {"name": "Editor", "email": "editor@test.com", "password": "editor123", "role": "editor"},
+            {"name": "Viewer", "email": "viewer@test.com", "password": "viewer123", "role": "viewer"},
+        ]
+
+        for user_data in users_to_seed:
+            existing = db.query(User).filter(User.email == user_data["email"]).first()
+            if existing is None:
+                user = User(
+                    name=user_data["name"],
+                    email=user_data["email"],
+                    password_hash=hash_password(user_data["password"]),
+                    role=user_data["role"],
+                )
+                db.add(user)
+                db.commit()
+                print(f"{user_data['role'].capitalize()} user created ({user_data['email']}).")
+            else:
+                print(f"{user_data['role'].capitalize()} already exists ({user_data['email']}).")
 
         # --- Firm / Matter / Budget seed ---
         firm = db.query(Firm).filter(Firm.firm_id == 1).first()

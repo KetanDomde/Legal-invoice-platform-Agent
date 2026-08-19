@@ -270,6 +270,7 @@ def extract_invoice_fields_mock(raw_text: str) -> dict:
     )
     # Try extracting a human-readable Matter name (e.g. "MAT-771B - Nova Retail v. Green Market")
     matter_match = re.search(r"Matter[:]?\s*([A-Za-z0-9-]+)\s*-\s*(.+)", raw_text, re.IGNORECASE)
+    firm_match = re.search(r"\b([A-Z][a-zA-C-z0-9'&.\- ]+?\b(?:L\.?L\.?P\.?|P\.?C\.?|L\.?L\.?C\.?|P\.?L\.?L\.?C\.?|Inc\.?|Ltd\.?|Law\s+Offices?|Legal\s+Group|Law\s+Group|Attorneys\s+at\s+Law))\b", raw_text, re.IGNORECASE)
     total_match = re.search(r"Total[:]?\s*\$?([\d,]+\.\d{2})", raw_text, re.IGNORECASE)
 
     line_items = []
@@ -305,6 +306,7 @@ def extract_invoice_fields_mock(raw_text: str) -> dict:
         "matter_no": matter_match.group(1).strip() if matter_match else None,      # NEW
 
         "matter_name": matter_match.group(2).strip() if matter_match else None,
+        "firm_name": firm_match.group(1).strip() if firm_match else None,
         "total_amount": total_amount,
         "line_items": line_items,
     }
@@ -314,7 +316,7 @@ def _build_extraction_prompt(raw_text: str) -> str:
     """
     FR-6 requires invoice_no, invoice_date, total_amount, AND line items
     (timekeeper, hours, rate, amount) — matches the ERD's LINE_ITEM table.
-    The original stub's prompt only asked for the top-level fields; this
+    The original stub's prompt only asked for the top-level fields; 
     expands it to actually satisfy FR-6.
 
     billing_period_start/end added per a later requirement — these were
@@ -331,6 +333,7 @@ def _build_extraction_prompt(raw_text: str) -> str:
         '  "billing_period_end": string or null (YYYY-MM-DD — end of the billing period covered by this invoice),\n'
         '  "matter_no": string or null (the matter/case identifier printed on the invoice, e.g. "MAT-771B"),\n'
         '  "matter_name": string or null (the matter/case name, e.g. "Nova Retail v. Green Market"),\n'
+        '  "firm_name": string or null (the firm/org name, e.g. "ABC Legal Associates"),\n'
         
         '  "total_amount": number (no currency symbol, no commas),\n'
         '  "line_items": [\n'
@@ -408,6 +411,7 @@ def _normalize_extracted_fields(data: dict) -> dict:
         "billing_period_end": data.get("billing_period_end"),
         "matter_no": (data.get("matter_no") or "").strip() or None,
         "matter_name": data.get("matter_name"),
+        "firm_name": data.get("firm_name"),
         "total_amount": _to_float(data.get("total_amount")),
         "line_items": line_items,
     }
@@ -531,6 +535,7 @@ def resolve_matter(state: InvoiceGraphState) -> InvoiceGraphState:
 
     extracted = state["extracted"]
     matter_no = extracted.get("matter_no") or state.get("matter_no_override")
+    firm_name = extracted.get("firm_name")
 
     if not matter_no:
         # No matter identifier extractable at all — can't proceed automatically.
@@ -539,7 +544,7 @@ def resolve_matter(state: InvoiceGraphState) -> InvoiceGraphState:
         return state
 
     matter = get_or_create_matter(
-        state["db"], matter_no, extracted.get("matter_name"), firm_name=state.get("firm_name")
+        state["db"], matter_no, extracted.get("matter_name"), firm_name=firm_name
     )
     state["matter_id"] = matter.matter_id
     state["firm_id"] = matter.firm_id
@@ -557,12 +562,40 @@ def no_matter_found(state: InvoiceGraphState) -> InvoiceGraphState:
     return state
 
 
-
-
 def _log(state: InvoiceGraphState, message: str) -> None:
-    state.setdefault("audit_trail", []).append(
-        f"[{datetime.now(timezone.utc).isoformat()}] {message}"
-    )
+    ts_msg = f"[{datetime.now(timezone.utc).isoformat()}] {message}"
+    state.setdefault("audit_trail", []).append(ts_msg)
+
+    # Persist as structured audit log when a DB session is available.
+    db = state.get("db")
+    if db is not None:
+        try:
+            def _derive_action(msg: str) -> str:
+                # Create a short machine-friendly action key from the
+                # human message: take first 3 alpha words, lowercase,
+                # replace non-alphanum with underscores.
+                words = re.findall(r"[A-Za-z0-9]+", msg)
+                key = "_".join(words[:3]).lower()
+                return key or "event"
+
+            action = _derive_action(message)
+            add_audit_log(
+                db,
+                action=action,
+                user_id=-1,
+                invoice_id=state.get("invoice_id"),
+                notes=message,
+            )
+            # Flush so downstream nodes can rely on persisted audit ids
+            # if needed; ignore flush errors to avoid interrupting flow.
+            try:
+                db.flush()
+            except Exception:
+                pass
+        except Exception:
+            # Never let audit persistence break the workflow; keep silent
+            # and rely on the in-memory `audit_trail` for debugging.
+            pass
 
 
 def ingest_invoice(state: InvoiceGraphState) -> InvoiceGraphState:
@@ -689,6 +722,7 @@ def human_review(state: InvoiceGraphState) -> InvoiceGraphState:
     add_audit_log(
         state["db"],
         action="validated",
+        user_id=-1,
         invoice_id=invoice.invoice_id,
         notes=invoice.validation_message,
     )
@@ -769,53 +803,7 @@ def draw_graph():
     
     with open("graph_diagram.png", "wb") as f:
         f.write(png_bytes)
-        
-        
-# def call_run_invoice_graph(filepath, matter_id):
-
-#     from app.database.database import SessionLocal
-#     from app.models.matter import Matter
-#     from app.models.firm import Firm
-
-#     db = SessionLocal()
-
-#     # Seed firm/matter only if they don't already exist
-#     # firm = db.get(Firm, 1)
-#     # if firm is None:
-#     #     firm = Firm(
-#     #         firm_id=1,
-#     #         name="Sample Outside Counsel LLP",
-#     #         contact_email="contact@samplefirm.com",
-#     #         status="active",
-#     #     )
-#     #     db.add(firm)
-#     #     db.commit()
-
-#     matter = db.get(Matter, matter_id)
-#     # if matter is None:
-#     #     matter = Matter(
-#     #         firm_id=1,
-#     #         matter_id=1,
-#     #         name="Firm 1 Matter",
-#     #         owner="Owner 1",
-#     #         status="open",
-#     #     )
-#     #     db.add(matter)
-#     #     db.commit()
-
-#     # from pathlib import Path
-
-#     # REPO_ROOT = Path(__file__).resolve().parents[3]
-#     # TEST_INVOICE_PATH = REPO_ROOT / "legal_docs" / "test_invoice.pdf"
-
-#     state = run_invoice_graph(
-#         db,
-#         file_path=filepath,
-#         matter_id=matter_id,
-#         firm_id=matter.firm_id,
-#     )
-#     print(state)
-#     return state
+  
 def call_run_invoice_graph(filepath, matter_no_override: str | None = None, firm_name: str | None = None):
     from app.database.database import SessionLocal
 
@@ -825,7 +813,9 @@ def call_run_invoice_graph(filepath, matter_no_override: str | None = None, firm
             db, file_path=filepath, matter_no_override=matter_no_override, firm_name=firm_name
         )
         db.commit()
-        print(state)
         return state
     finally:
         db.close()
+
+if __name__=="__main__":
+    draw_graph()

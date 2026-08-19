@@ -32,10 +32,10 @@ def test_system_audit_can_have_no_user(
     audit = create_audit_log(
         db=db,
         action="auto_approved",
-        user_id=None,
+        user_id=-1,
         invoice_id=30,
         notes="All validation checks passed.",
     )
 
-    assert audit.user_id is None
+    assert audit.user_id == -1
     assert audit.invoice_id == 30

@@ -142,7 +142,6 @@ def persist_extracted_invoice(
 ) -> Invoice:
     validate_relationships(db, matter_id, firm_id)
     parsed = ExtractedInvoice.model_validate(fields)
-    print("parsed========>:", parsed)
     invoice = Invoice(
         matter_id=matter_id,
         firm_id=firm_id,

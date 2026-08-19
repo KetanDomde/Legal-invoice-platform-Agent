@@ -25,6 +25,15 @@ just update the import in main.py to match.)
 Run directly for the Day 2 demo:
     python -m app.workflows.legal_invoice_platform_agent path/to/sample_invoice.pdf --matter-id 1 --firm-id 1
 """
+
+# DEPRECATION MARKER -----------------------------------------------------
+# DEPRECATED_FILE: This module is deprecated and preserved for historical
+# reference only. Do NOT modify or apply automated code conversions here.
+# Automated tools and repo-wide sweeps should skip this file when making
+# changes; use backend/app/workflow/graph.py (the active graph) instead.
+# A machine-searchable flag follows for scripts that respect it:
+DEPRECATED_FILE = True
+
 from __future__ import annotations
 
 import argparse

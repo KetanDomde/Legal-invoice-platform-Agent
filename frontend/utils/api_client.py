@@ -7,6 +7,7 @@ server (default http://localhost:8000).
 """
 import requests
 import streamlit as st
+import uuid
 
 DEFAULT_BASE_URL = "http://localhost:8000"
 
@@ -31,6 +32,15 @@ class APIClient:
         h = {}
         if self.token:
             h["Authorization"] = f"Bearer {self.token}"
+        # Ensure a persistent session_id for grouping a user's Streamlit session
+        if "session_id" not in st.session_state:
+            st.session_state.session_id = str(uuid.uuid4())
+        # Generate a per-request unique id and expose it to the UI
+        request_id = str(uuid.uuid4())
+        h["X-Request-ID"] = request_id
+        h["X-Session-ID"] = st.session_state.session_id
+        # Save last request id for UI debug/traceability
+        st.session_state["last_request_id"] = request_id
         return h
 
     def _call(self, method: str, path: str, **kwargs):

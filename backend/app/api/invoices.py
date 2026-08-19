@@ -29,7 +29,7 @@ get_current_user (Trinkesh's dependency). update_invoice (PUT) does not
 yet — flag at standup if that's intentional or a gap.
 """
 from __future__ import annotations
-from app.auth.dependencies import get_current_user
+from app.auth.security import ADMIN, EDITOR, require_role
 from app.models import User
 import re
 import uuid
@@ -99,7 +99,7 @@ async def submit_invoice(
             "Falls back to an auto-created 'Unassigned Firm' if omitted."
         ),
     ),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role([ADMIN, EDITOR])),
 ):
     content = await file.read()
     saved_path = _save_upload_to_disk(file, content)
@@ -107,7 +107,6 @@ async def submit_invoice(
     try:
         final_state = call_run_invoice_graph(saved_path, matter_no_override=matter_no, firm_name=firm_name)
     except InvoiceAlreadyExistsError as e:
-        print(e)
         return JSONResponse(
             status_code=409,
             content={

@@ -2,6 +2,9 @@ from contextlib import asynccontextmanager
 
 from typing import Any
 from fastapi import FastAPI, Request
+import uuid
+
+from app.logger_config import logger, request_id_ctx, ensure_request_id
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -29,6 +32,23 @@ app = FastAPI(
     version="2.0.0",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    # Capture Request-ID header from Streamlit (or fallback to new UUID)
+    req_id = request.headers.get("X-Request-ID") or request.headers.get("X-Session-ID")
+    if not req_id:
+        req_id = str(uuid.uuid4())
+    # set in contextvar for downstream use
+    token = request_id_ctx.set(req_id)
+    logger.info(f"Incoming request: {request.method} {request.url.path}")
+    try:
+        response = await call_next(request)
+        logger.info(f"Request completed with status: {response.status_code}")
+        return response
+    finally:
+        request_id_ctx.reset(token)
 
 app.add_middleware(
     CORSMiddleware,

@@ -168,7 +168,10 @@ class AuditLog(Base):
     __tablename__ = "audit_logs"
 
     audit_id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.user_id"), index=True)
+    # NOTE: user_id is now required for every audit log. System actions use user_id=-1.
+    # This column is non-nullable to enforce that every audit entry has a recorded actor.
+    # Ensure a "system" user row exists if you want strict FK enforcement for -1.
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.user_id"), nullable=False, index=True)
     invoice_id: Mapped[Optional[int]] = mapped_column(ForeignKey("invoices.invoice_id"), index=True)
     action: Mapped[str] = mapped_column(String(100), nullable=False)
     notes: Mapped[Optional[str]] = mapped_column(Text)
@@ -180,3 +183,4 @@ class AuditLog(Base):
 
     user: Mapped[Optional["User"]] = relationship(back_populates="audit_logs")
     invoice: Mapped[Optional["Invoice"]] = relationship(back_populates="audit_logs")
+    request_id: Mapped[Optional[str]] = mapped_column(String(100), index=True)

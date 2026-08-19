@@ -185,7 +185,7 @@ def auto_approve_invoice(
     add_audit_log(
         db=db,
         action="auto_approved",
-        user_id=None,
+        user_id=-1,
         invoice_id=invoice.invoice_id,
         notes=note,
     )

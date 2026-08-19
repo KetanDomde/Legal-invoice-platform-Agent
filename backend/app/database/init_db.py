@@ -11,6 +11,23 @@ def init_db():
 
     db = SessionLocal()
     try:
+        # --- System user for automated actions (user_id = -1) ---
+        system_user = db.query(User).filter(User.user_id == -1).first()
+        if system_user is None:
+            system_user = User(
+                user_id=-1,
+                name="System",
+                email="system@test.com",
+                password_hash=hash_password(""),
+                role="admin",
+                is_active=False,
+            )
+            db.add(system_user)
+            db.commit()
+            print("Created system user (user_id=-1).")
+        else:
+            print("System user already exists (user_id=-1).")
+
         # --- Users (admin / editor / viewer) ---
         users_to_seed = [
             {"name": "Admin", "email": "admin@test.com", "password": "admin123", "role": "admin"},

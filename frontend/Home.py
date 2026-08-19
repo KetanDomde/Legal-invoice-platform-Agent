@@ -1,37 +1,40 @@
+import pandas as pd
+import plotly.express as px
 import streamlit as st
 
-from utils.theme import inject_base_css, render_banner, role_badge, kpi_tile, money
+from utils.theme import (
+    STATUS_COLORS, badge, inject_base_css, kpi_tile, page_header,
+    render_banner, role_badge, sidebar_brand, status_badge,
+)
 from utils.api_client import get_client, APIError, DEFAULT_BASE_URL
-from utils.submit_result import render_persisted_submit_result, render_persisted_submit_error, RESULT_KEY, ERROR_KEY
 
-st.set_page_config(page_title="Konverge | Legal Invoice Platform", page_icon="⚖️", layout="wide")
+st.set_page_config(page_title="Konverge | Legal Invoice Platform", page_icon="📥", layout="wide")
 inject_base_css()
+sidebar_brand()
 
 if "base_url" not in st.session_state:
     st.session_state["base_url"] = DEFAULT_BASE_URL
 
 with st.sidebar:
-    st.markdown("##### ⚙️ Connection")
-    st.session_state["base_url"] = st.text_input(
-        "API base URL", value=st.session_state["base_url"],
-        help="Point this at your FastAPI server. Defaults to your local backend.",
-    )
-
-    # Health check — surfaces a clear "backend's not running" message
-    # instead of a confusing connection error further down the page.
-    client_probe = get_client()
-    try:
-        client_probe.health()
-        st.success("API connected")
-    except APIError as e:
-        st.error(f"API unreachable: {e.detail}")
+    st.caption("Agent Workbench")
+    with st.expander("⚙️ Connection", expanded=False):
+        st.session_state["base_url"] = st.text_input(
+            "API base URL", value=st.session_state["base_url"],
+            help="Point this at your FastAPI server. Defaults to your local backend.",
+        )
+        client_probe = get_client()
+        try:
+            client_probe.health()
+            st.success("API connected")
+        except APIError as e:
+            st.error(f"API unreachable: {e.detail}")
 
     if st.session_state.get("user"):
         u = st.session_state["user"]
         st.markdown(
             f"""<div class="kv-sidebar-card">
                     <b>{u['name']}</b><br/>{role_badge(u['role'])}
-                    <div style="color:#807F85;font-size:0.8rem;margin-top:4px;">{u['email']}</div>
+                    <div style="font-size:0.8rem;margin-top:4px;">{u['email']}</div>
                 </div>""",
             unsafe_allow_html=True,
         )
@@ -73,26 +76,51 @@ if not st.session_state.get("token"):
     st.stop()
 
 user = st.session_state["user"]
-st.markdown(f"### Welcome back, {user['name'].split()[0]} 👋")
-st.caption(
-    "Permissions are enforced by the backend on every request — the buttons you see here are just "
-    "a convenience that match your role."
-)
-
 client = get_client()
+
 try:
     invoices = client.list_invoices() or []
-    review_q = client.review_queue() if user["role"] in ("admin", "editor") else []
+except APIError as e:
+    invoices = []
+    st.warning(f"Couldn't load invoices: {e.detail}")
+
+try:
+    matters = {m["matter_id"]: m for m in client.list_matters()}
+except APIError as e:
+    matters = {}
+    st.warning(f"Couldn't load matters: {e.detail}")
+
+review_q = []
+if user["role"] in ("admin", "editor"):
+    try:
+        review_q = client.review_queue()
+    except APIError:
+        # Global (non-firm-scoped) admins can't have a review queue —
+        # the endpoint requires a firm-scoped user by design. Not an
+        # error worth surfacing on every Home load; the Review Queue
+        # page itself explains this if they navigate there directly.
+        review_q = []
+
+try:
     alerts = client.list_alerts() or []
 except APIError as e:
-    invoices, review_q, alerts = [], [], []
-    st.warning(f"Couldn't load a quick summary: {e.detail}")
+    alerts = []
+    st.warning(f"Couldn't load alerts: {e.detail}")
+
+df = pd.DataFrame(invoices)
+
+page_header(
+    1, "Invoice Inbox / Intake Queue",
+    f"Welcome back, {user['name'].split()[0]} — every row here is live from the database, and permissions are "
+    "enforced by the backend on every request.",
+    extra_badge=badge("Live Data", "blue"),
+)
 
 c1, c2, c3, c4 = st.columns(4)
 with c1:
-    kpi_tile("Total invoices", str(len(invoices)))
+    kpi_tile("Total invoices", str(len(df)))
 with c2:
-    kpi_tile("Total spend", money(sum(i.get("total_amount", 0) for i in invoices)) if invoices else "$0.00")
+    kpi_tile("Total spend", f"${df['total_amount'].sum():,.2f}" if not df.empty else "$0.00")
 with c3:
     kpi_tile("Pending review", str(len(review_q)))
 with c4:
@@ -100,37 +128,93 @@ with c4:
 
 st.markdown("&nbsp;")
 
-# --- Upload Invoice: wired to the real, confirmed-working pipeline endpoint ---
-if user["role"] in ("admin", "editor"):
-    render_persisted_submit_result()
-    render_persisted_submit_error()
+col_a, col_b, col_c = st.columns([2, 2, 3])
+with col_a:
+    status_options = ["All"] + (sorted(df["status"].unique().tolist()) if not df.empty else [])
+    status_filter = st.selectbox("Status", status_options)
+with col_b:
+    matter_options = ["All"] + [m["name"] for m in matters.values()]
+    matter_filter = st.selectbox("Matter", matter_options)
+with col_c:
+    st.write("")
+    if user["role"] in ("admin", "editor") and st.button("+ New Intake", type="primary"):
+        st.switch_page("pages/2_New_Intake.py")
 
-    with st.expander("📤 Submit Invoice for Processing", expanded=False):
-        uploaded_file = st.file_uploader("Invoice file", type=["pdf", "txt"])
+filtered = invoices
+if status_filter != "All":
+    filtered = [i for i in filtered if i["status"] == status_filter]
+if matter_filter != "All":
+    filtered = [i for i in filtered if matters.get(i["matter_id"], {}).get("name") == matter_filter]
 
-        can_submit = uploaded_file is not None
-        if st.button("Submit invoice", type="primary", disabled=not can_submit):
-            with st.spinner("Extracting, validating, and persisting..."):
-                try:
-                    result = client.submit_invoice(uploaded_file)
-                except APIError as e:
-                    if e.status_code == 409:
-                        st.session_state[ERROR_KEY] = {
-                            "label": "Duplicate",
-                            "detail": e.detail,
-                            "inv_changes": getattr(e, "inv_changes", None),
-                        }
-                    elif e.status_code == 422:
-                        st.error(f"Invalid request: {e.detail}")
-                    else:
-                        st.error(f"API error {e.status_code}: {e.detail}")
-                    result = None
+if not filtered:
+    st.info("No invoices match these filters yet.")
+else:
+    rows = []
+    for i in filtered:
+        rows.append({
+            "Invoice": i.get("invoice_no") or f"#{i['invoice_id']}",
+            "Matter": matters.get(i["matter_id"], {}).get("name", f"Matter {i['matter_id']}"),
+            "Amount": f"${i['total_amount']:,.2f}" if i.get("total_amount") is not None else "—",
+            "Confidence": f"{i['confidence_score']:.0%}" if i.get("confidence_score") is not None else "—",
+            "Status": i["status"],
+            "_id": i["invoice_id"],
+        })
+    show_df = pd.DataFrame(rows)
+    st.dataframe(show_df.drop(columns=["_id"]), use_container_width=True, hide_index=True)
 
-            if result is not None:
-                st.session_state[RESULT_KEY] = result
-                st.rerun()
-            elif ERROR_KEY in st.session_state:
-                st.rerun()
+    st.markdown("#### Open an Invoice")
+    id_lookup = {f"{r['Invoice']} · {r['Matter']}": r["_id"] for r in rows}
+    chosen = st.selectbox("Invoice", list(id_lookup.keys()), label_visibility="collapsed")
+    c1, c2 = st.columns([1, 5])
+    with c1:
+        if st.button("Open Workspace →"):
+            st.session_state["selected_invoice_id"] = id_lookup[chosen]
+            st.switch_page("pages/3_Invoice_Workspace.py")
 
-st.markdown("Use the pages in the sidebar to navigate: **Dashboard**, **Invoices**, **Review Queue**, "
-            "**Firms & Matters**, **Budgets & Alerts**, **Audit Log**, and (Admin only) **Admin Users**.")
+st.markdown("&nbsp;")
+left, right = st.columns([1, 1.3])
+
+with left:
+    with st.container(border=True):
+        st.markdown("##### Invoice status breakdown")
+        if not df.empty:
+            counts = df["status"].value_counts().reset_index()
+            counts.columns = ["status", "count"]
+            fig = px.pie(
+                counts, names="status", values="count", hole=0.55,
+                color="status", color_discrete_map=STATUS_COLORS,
+            )
+            fig.update_traces(textinfo="value+percent", textfont_size=13)
+            fig.update_layout(showlegend=True, margin=dict(t=10, b=10, l=10, r=10), height=300,
+                               legend=dict(orientation="h", y=-0.15))
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No invoices yet.")
+
+with right:
+    with st.container(border=True):
+        st.markdown("##### Spend by matter")
+        if not df.empty:
+            import plotly.graph_objects as go
+            from utils.theme import ORANGE
+            df["matter_name"] = df["matter_id"].map(lambda mid: matters.get(mid, {}).get("name", f"Matter {mid}"))
+            by_matter = df.groupby("matter_name")["total_amount"].sum().reset_index().sort_values("total_amount")
+            fig2 = go.Figure(go.Bar(
+                x=by_matter["total_amount"], y=by_matter["matter_name"], orientation="h",
+                marker_color=ORANGE, text=[f"${v:,.2f}" for v in by_matter["total_amount"]], textposition="outside",
+            ))
+            fig2.update_layout(margin=dict(t=10, b=10, l=10, r=30), height=300,
+                                xaxis_title=None, yaxis_title=None, plot_bgcolor="white")
+            st.plotly_chart(fig2, use_container_width=True)
+        else:
+            st.info("No invoices yet.")
+
+if alerts:
+    st.markdown("##### 🔔 Active alerts")
+    for a in alerts:
+        st.warning(a["message"])
+
+st.caption(
+    "Use the sidebar to move through the workbench: New Intake → Invoice Workspace → Matter & Budget Context → "
+    "Validation Check → Review Queue → Review Decision → Budgets & Alerts → Audit Log → Admin Control."
+)

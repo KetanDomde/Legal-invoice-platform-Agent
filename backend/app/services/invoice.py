@@ -9,6 +9,7 @@ from app.models import User
 from app.schemas.invoice_extraction import ExtractedInvoice
 from datetime import datetime
 from typing import Any
+from app.logger_config import request_id_ctx
 
 
 CONFIDENCE_THRESHOLD = 0.85
@@ -20,15 +21,26 @@ def add_audit_log(
     db: Session,
     *,
     action: str,
-    user_id: int | None = None,
+    user_id: int,
     invoice_id: int | None = None,
     notes: str | None = None,
+    request_id: str | None = None,
 ) -> AuditLog:
+    """Add an AuditLog row. `user_id` is required; use -1 for system actions."""
+    if user_id is None:
+        raise ValueError("user_id is required for audit logs; use -1 for system actions")
+    if request_id is None:
+        try:
+            request_id = request_id_ctx.get()
+        except Exception:
+            request_id = None
+
     log = AuditLog(
         action=action,
         user_id=user_id,
         invoice_id=invoice_id,
         notes=notes,
+        request_id=request_id,
     )
     db.add(log)
     return log
@@ -183,6 +195,7 @@ def validate_and_route_invoice(
     add_audit_log(
         db,
         action="auto_approved" if result["decision"] == AUTO_APPROVE else "validated",
+        user_id=-1,
         invoice_id=invoice.invoice_id,
         notes=invoice.validation_message,
     )

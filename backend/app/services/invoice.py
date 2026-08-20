@@ -1,22 +1,22 @@
 from __future__ import annotations
-
+ 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
-
+ 
 from app.models import Alert, AuditLog, Budget, BudgetLedger, Invoice
 from app.models import User
-
+ 
 from app.schemas.invoice_extraction import ExtractedInvoice
 from datetime import datetime
 from typing import Any
 from app.logger_config import request_id_ctx
-
-
+ 
+ 
 CONFIDENCE_THRESHOLD = 0.85
 AUTO_APPROVE = "auto_approved"
 HUMAN_REVIEW = "pending_review"
-
-
+ 
+ 
 def add_audit_log(
     db: Session,
     *,
@@ -34,7 +34,7 @@ def add_audit_log(
             request_id = request_id_ctx.get()
         except Exception:
             request_id = None
-
+ 
     log = AuditLog(
         action=action,
         user_id=user_id,
@@ -44,13 +44,13 @@ def add_audit_log(
     )
     db.add(log)
     return log
-
-
+ 
+ 
 def get_budget_summary(db: Session, matter_id: int) -> dict:
     budget = db.query(Budget).filter(Budget.matter_id == matter_id).first()
     if budget is None:
         raise ValueError(f"No budget found for matter_id={matter_id}")
-
+ 
     utilized = (
         db.query(func.coalesce(func.sum(Invoice.total_amount), 0))
         .filter(
@@ -63,7 +63,7 @@ def get_budget_summary(db: Session, matter_id: int) -> dict:
     total = float(budget.allocated_amt)
     remaining = total - utilized
     pct_used = (utilized / total * 100) if total else 100.0
-
+ 
     return {
         "budget": budget,
         "utilized": utilized,
@@ -72,8 +72,8 @@ def get_budget_summary(db: Session, matter_id: int) -> dict:
         "pct_used": pct_used,
         "threshold_pct": float(budget.threshold_pct),
     }
-
-
+ 
+ 
 def find_duplicate_invoice(
     db: Session,
     *,
@@ -86,13 +86,13 @@ def find_duplicate_invoice(
         Invoice.firm_id == firm_id,
         Invoice.invoice_no == invoice_no,
         # removing amount for finding duplicate
-        # Invoice.total_amount == total_amount, 
+        # Invoice.total_amount == total_amount,
     )
     if exclude_invoice_id is not None:
         query = query.filter(Invoice.invoice_id != exclude_invoice_id)
     return query.first()
-
-
+ 
+ 
 def validate_invoice(
     db: Session,
     invoice: Invoice,
@@ -101,12 +101,12 @@ def validate_invoice(
     duplicate_flag: bool | None = None,
 ) -> dict:
     """Run invoice validation synchronously.
-
+ 
     API callers may provide the already-computed budget/duplicate flags.
     When omitted, the service calculates them from the database.
     """
     confidence = invoice.confidence_score if confidence_score is None else confidence_score
-
+ 
     budget = None
     if budget_valid is None:
         try:
@@ -129,7 +129,7 @@ def validate_invoice(
                 remaining_budget = float(invoice.total_amount)
         else:
             remaining_budget = 0.0
-
+ 
     duplicate = None
     if duplicate_flag is None:
         duplicate = find_duplicate_invoice(
@@ -154,13 +154,13 @@ def validate_invoice(
         reasons.append(
             f"Extraction confidence {confidence:.2f} is below threshold {CONFIDENCE_THRESHOLD:.2f}."
         )
-
+ 
     validation_passed = budget_ok and not duplicate_flag_value
     decision = AUTO_APPROVE if validation_passed and confidence is not None and confidence >= CONFIDENCE_THRESHOLD else HUMAN_REVIEW
-
+ 
     if not reasons:
         reasons.append("All validation checks passed." if decision == AUTO_APPROVE else "Invoice requires manual review.")
-
+ 
     return {
         "validation_passed": validation_passed,
         "budget_ok": budget_ok,
@@ -172,8 +172,8 @@ def validate_invoice(
         "decision": decision,
         "reasons": reasons,
     }
-
-
+ 
+ 
 def validate_and_route_invoice(
     db: Session,
     invoice: Invoice,
@@ -184,14 +184,14 @@ def validate_and_route_invoice(
     result = validate_invoice(
         db, invoice, confidence_score, budget_valid, duplicate_flag
     )
-
+ 
     invoice.confidence_score = result["confidence_score"]
     invoice.budget_valid = result["budget_ok"]
     invoice.duplicate_flag = result["duplicate"]
     invoice.validation_status = "passed" if result["validation_passed"] else "failed"
     invoice.validation_message = "; ".join(result["reasons"])
     invoice.status = "approved" if result["decision"] == AUTO_APPROVE else "pending_review"
-
+ 
     add_audit_log(
         db,
         action="auto_approved" if result["decision"] == AUTO_APPROVE else "validated",
@@ -202,13 +202,13 @@ def validate_and_route_invoice(
     db.commit()
     db.refresh(invoice)
     return result
-
-
+ 
+ 
 def _post_budget_entry(db: Session, invoice: Invoice) -> None:
     budget = db.query(Budget).filter(Budget.matter_id == invoice.matter_id).first()
     if budget is None:
         return
-
+ 
     already_posted = (
         db.query(BudgetLedger)
         .filter(
@@ -219,7 +219,7 @@ def _post_budget_entry(db: Session, invoice: Invoice) -> None:
     )
     if already_posted:
         return
-
+ 
     db.add(
         BudgetLedger(
             budget_id=budget.budget_id,
@@ -228,7 +228,7 @@ def _post_budget_entry(db: Session, invoice: Invoice) -> None:
             entry_type="invoice_approved",
         )
     )
-
+ 
     summary = get_budget_summary(db, invoice.matter_id)
     projected_pct = summary["pct_used"]
     if projected_pct >= summary["threshold_pct"]:
@@ -243,76 +243,38 @@ def _post_budget_entry(db: Session, invoice: Invoice) -> None:
                 ),
             )
         )
-
-
+ 
+ 
 def approve_invoice(db: Session, invoice: Invoice, user_id: int, notes: str | None = None) -> Invoice:
     # Canonical approval implementation lives in workflow/approval_service.py.
     from app.workflow.approval_service import approve_invoice as _approve_invoice
     return _approve_invoice(db=db, invoice=invoice, user_id=user_id, notes=notes)
-
+ 
 def reject_invoice(db: Session, invoice: Invoice, user_id: int, reason: str) -> Invoice:
-    if invoice.status != "pending_review":
-        raise ValueError("Only invoices pending review can be rejected.")
-    if not reason.strip():
-        raise ValueError("Rejection reason is required.")
-
-    old_status = invoice.status
-    invoice.status = "rejected"
-    add_audit_log(
-        db,
-        action="rejected",
-        user_id=user_id,
-        invoice_id=invoice.invoice_id,
-        notes=_status_note(old_status, invoice.status, reason),
-    )
-    db.commit()
-    db.refresh(invoice)
-    return invoice
-
-
+    # Canonical rejection implementation lives in workflow/rejection_service.py.
+    from app.services.review_service import reject_invoice as _reject_invoice
+    return _reject_invoice(db=db, invoice=invoice, user_id=user_id, reason=reason)
+ 
+ 
 def request_clarification(db: Session, invoice: Invoice, user_id: int, reason: str) -> Invoice:
-    if invoice.status != "pending_review":
-        raise ValueError("Clarification can only be requested for invoices pending review.")
-    if not reason.strip():
-        raise ValueError("Clarification reason is required.")
-
-    old_status = invoice.status
-    invoice.status = "clarification_requested"
-    add_audit_log(
-        db,
-        action="clarification_requested",
-        user_id=user_id,
-        invoice_id=invoice.invoice_id,
-        notes=_status_note(old_status, invoice.status, reason),
-    )
-    db.commit()
-    db.refresh(invoice)
-    return invoice
-
-
+    # Canonical clarification implementation lives in workflow/clarification_service.py.
+    from app.services.review_service import request_clarification as _request_clarification
+    return _request_clarification(db=db, invoice=invoice, user_id=user_id, reason=reason)
+ 
+ 
 def get_review_reasons(invoice: Invoice) -> list[str]:
-    reasons: list[str] = []
-    if invoice.confidence_score is not None and invoice.confidence_score < CONFIDENCE_THRESHOLD:
-        reasons.append("Extraction confidence is below threshold.")
-    if invoice.budget_valid is False:
-        reasons.append("Invoice failed budget validation.")
-    if invoice.duplicate_flag:
-        reasons.append("Possible duplicate invoice detected.")
-    if not reasons:
-        reasons.append("Invoice requires manual review.")
-    return reasons
-
-
-def get_review_queue(db: Session, firm_id: int) -> list[dict]:
-    invoices = (
-        db.query(Invoice)
-        .filter(
-            Invoice.firm_id == firm_id,
-            Invoice.status.in_([HUMAN_REVIEW.replace("human_review", "pending_review"), "clarification_requested"]),
-        )
-        .order_by(Invoice.invoice_date.asc().nulls_last(), Invoice.invoice_id.asc())
-        .all()
+    # Canonical reason-builder lives in workflow/review_reason.py.
+    from app.services.review_service import build_review_reasons
+    return build_review_reasons(invoice)
+ 
+ 
+def get_review_queue(db: Session, firm_id: int | None) -> list[dict]:
+    query = db.query(Invoice).filter(
+        Invoice.status.in_([HUMAN_REVIEW.replace("human_review", "pending_review"), "clarification_requested"]),
     )
+    if firm_id is not None:
+        query = query.filter(Invoice.firm_id == firm_id)
+    invoices = query.order_by(Invoice.invoice_date.asc().nulls_last(), Invoice.invoice_id.asc()).all()
     return [
         {
             "invoice_id": invoice.invoice_id,
@@ -331,39 +293,38 @@ def get_review_queue(db: Session, firm_id: int) -> list[dict]:
         }
         for invoice in invoices
     ]
-
-
-def get_invoice_for_review(db: Session, invoice_id: int, firm_id: int) -> Invoice:
-    invoice = (
-        db.query(Invoice)
-        .filter(Invoice.invoice_id == invoice_id, Invoice.firm_id == firm_id)
-        .first()
-    )
+ 
+ 
+def get_invoice_for_review(db: Session, invoice_id: int, firm_id: int | None) -> Invoice:
+    query = db.query(Invoice).filter(Invoice.invoice_id == invoice_id)
+    if firm_id is not None:
+        query = query.filter(Invoice.firm_id == firm_id)
+    invoice = query.first()
     if invoice is None:
         raise ValueError("Invoice not found.")
     return invoice
-
-
+ 
+ 
 def _status_note(old_status: str, new_status: str, reason: str | None = None) -> str:
     note = f"Status changed from '{old_status}' to '{new_status}'."
     if reason:
         note += f" Reason: {reason}"
     return note
-
-
+ 
+ 
 def get_duplicate_invoice(inv: Invoice) -> ExtractedInvoice | None:
     return ExtractedInvoice.model_validate(inv)
-
-
+ 
+ 
 def diff_invoices(
     original: ExtractedInvoice, duplicate: ExtractedInvoice
 ) -> dict[str, Any]:
     """Compares two ExtractedInvoice instances and returns a structured diff
-
+ 
     containing only the changed fields with their original and modified values.
     """
     diff: dict[str, Any] = {}
-
+ 
     # 1. Compare top-level scalar fields
     scalar_fields = ["invoice_no", "invoice_date", "total_amount"]
     for field in scalar_fields:
@@ -375,22 +336,22 @@ def diff_invoices(
                 "original": orig_val,
                 "duplicate": dupe_val,
             }
-
+ 
     # 2. Compare line items
     orig_items = original.line_items
     dupe_items = duplicate.line_items
     line_item_diffs = []
-
+ 
     max_len = max(len(orig_items), len(dupe_items))
     line_item_fields = ["timekeeper", "hours", "rate", "amount"]
-
+ 
     for i in range(max_len):
         # Case A: Item present in both
         if i < len(orig_items) and i < len(dupe_items):
             item_orig = orig_items[i]
             item_dupe = dupe_items[i]
             item_changes = {}
-
+ 
             for field in line_item_fields:
                 val_orig = getattr(item_orig, field)
                 val_dupe = getattr(item_dupe, field)
@@ -400,10 +361,10 @@ def diff_invoices(
                         "original": val_orig,
                         "duplicate": val_dupe,
                     }
-
+ 
             if item_changes:
                 line_item_diffs.append({"index": i, "changes": item_changes})
-
+ 
         # Case B: Item deleted in duplicate
         elif i < len(orig_items):
             line_item_diffs.append(
@@ -413,7 +374,7 @@ def diff_invoices(
                     "original": orig_items[i].model_dump(),
                 }
             )
-
+ 
         # Case C: Item added in duplicate
         else:
             line_item_diffs.append(
@@ -423,8 +384,8 @@ def diff_invoices(
                     "duplicate": dupe_items[i].model_dump(),
                 }
             )
-
+ 
     if line_item_diffs:
         diff["line_items"] = line_item_diffs
-
+ 
     return diff

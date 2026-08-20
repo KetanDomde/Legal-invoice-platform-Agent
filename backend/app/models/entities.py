@@ -184,3 +184,8 @@ class AuditLog(Base):
     user: Mapped[Optional["User"]] = relationship(back_populates="audit_logs")
     invoice: Mapped[Optional["Invoice"]] = relationship(back_populates="audit_logs")
     request_id: Mapped[Optional[str]] = mapped_column(String(100), index=True)
+    
+    @property
+    def user_name(self) -> Optional[str]:
+        """Convenience property exposing the related user's name for API serialization."""
+        return self.user.name if self.user is not None else None

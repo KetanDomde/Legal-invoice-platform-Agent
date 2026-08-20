@@ -195,8 +195,13 @@ class APIClient:
             "budget_valid": budget_valid, "duplicate_flag": duplicate_flag, "confidence_score": confidence_score})
 
     # --- audit logs ---------------------------------------------------------------
-    def list_audit_logs(self, invoice_id=None, user_id=None):
-        return self._call("GET", "/audit-logs/", params={"invoice_id": invoice_id, "user_id": user_id})
+    def list_audit_logs(self, invoice_id=None, user_id=None, filter: str | None = None, limit: int | None= None):
+        params = {"invoice_id": invoice_id, "user_id": user_id}
+        if filter:
+            params["filter"] = filter
+        if limit:
+            params["limit"] = limit
+        return self._call("GET", "/audit-logs/", params=params or None)
 
 
 def get_client() -> APIClient:

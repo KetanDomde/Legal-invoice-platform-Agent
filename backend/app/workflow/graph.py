@@ -90,6 +90,7 @@ class InvoiceGraphState(TypedDict, total=False):
     final_status: str
     audit_trail: list[str]
     error: str
+    inv_changes: dict
     
     
 def _ocr_pdf_pages(doc) -> str:
@@ -650,13 +651,7 @@ def validate(state: InvoiceGraphState) -> InvoiceGraphState:
 
 
 def persist_invoice(state: InvoiceGraphState) -> InvoiceGraphState:
-    invoice = persist_extracted_invoice(
-        state["db"],
-        matter_id=state["matter_id"],
-        firm_id=state["firm_id"],
-        fields=state["extracted"],
-        confidence=state["confidence_score"],
-    )
+    invoice = persist_extracted_invoice(state)
     result = state["validation"]
     invoice.budget_valid = result["budget_ok"]
     invoice.duplicate_flag = result["duplicate"]
@@ -734,6 +729,15 @@ def human_review(state: InvoiceGraphState) -> InvoiceGraphState:
 
 def log_for_review(state: InvoiceGraphState) -> InvoiceGraphState:
     _log(state, "Human-review queue entry recorded through invoice status/audit log.")
+
+    from app.database.invoice_repository import InvoiceAlreadyExistsError
+    if state["inv_changes"]:
+        raise InvoiceAlreadyExistsError(
+                    invoice_no=state["extracted"]["invoice_no"],
+                    matter_id=str(state["matter_id"]),
+                    inv_changes=state["inv_changes"],
+                )
+
     return state
 
 
@@ -784,7 +788,7 @@ def run_invoice_graph(
     *,
     file_path: str,
     matter_no_override: str | None = None,
-    firm_name: str | None = None,
+    firm_name: str | None = None
 ) -> InvoiceGraphState:
     graph = build_invoice_graph()
     return graph.invoke(
@@ -804,7 +808,7 @@ def draw_graph():
     with open("graph_diagram.png", "wb") as f:
         f.write(png_bytes)
   
-def call_run_invoice_graph(filepath, matter_no_override: str | None = None, firm_name: str | None = None):
+def call_run_invoice_graph(filepath, matter_no_override: str | None = None, firm_name: str | None = None, updated_inv: bool = False):
     from app.database.database import SessionLocal
 
     db = SessionLocal()

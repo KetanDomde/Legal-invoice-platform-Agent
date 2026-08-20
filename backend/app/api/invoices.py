@@ -37,6 +37,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy.orm import Session, joinedload
 from app.core.config import settings
 
@@ -107,13 +108,11 @@ async def submit_invoice(
     try:
         final_state = call_run_invoice_graph(saved_path, matter_no_override=matter_no, firm_name=firm_name)
     except InvoiceAlreadyExistsError as e:
-        return JSONResponse(
-            status_code=409,
-            content={
-                "detail": str(e),
-                "inv_changes": getattr(e, "inv_changes", None) or {},
-            },
-        )
+        payload = {
+            "detail": str(e),
+            "inv_changes": getattr(e, "inv_changes", None) or {},
+        }
+        return JSONResponse(status_code=409, content=jsonable_encoder(payload))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Pipeline failed: {e}")
 

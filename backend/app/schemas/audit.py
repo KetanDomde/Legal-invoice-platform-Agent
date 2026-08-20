@@ -13,5 +13,6 @@ class AuditLogCreate(BaseModel):
 class AuditLogRead(AuditLogCreate):
     audit_id: int
     created_at: datetime
+    user_name: str | None = None
     model_config = {"from_attributes": True}
     request_id: str | None = None

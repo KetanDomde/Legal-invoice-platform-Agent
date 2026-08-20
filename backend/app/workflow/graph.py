@@ -664,7 +664,7 @@ def persist_invoice(state: InvoiceGraphState) -> InvoiceGraphState:
     invoice.validation_message = "; ".join(result["reasons"])
     state["invoice_id"] = invoice.invoice_id
     state["db"].flush()
-    _log(state, f"Invoice persisted with id={invoice.invoice_id} and {len(invoice.line_items)} line items.")
+    _log(state, f"Invoice '{invoice.invoice_no}' persisted with id={invoice.invoice_id} and {len(invoice.line_items)} line items.")
     return state
 
 

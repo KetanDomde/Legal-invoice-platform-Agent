@@ -22,7 +22,10 @@ from app.database.init_db import init_db,delete_db
 async def lifespan(app: FastAPI):
     init_db()
     yield
-    delete_db()
+    # Keep SQLite data on shutdown. Budget history and audit records must persist.
+    # For budget history and audit history, that is obviously not suitable.
+
+    # The updated file keeps the database alive after shutdown.
 
 
 
@@ -76,4 +79,3 @@ def root():
 @app.get("/health", tags=["Health"])
 def health():
     return {"status": "ok"}
-

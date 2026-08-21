@@ -15,6 +15,7 @@ env/
 .vscode/
  
 *.db
+*.db.backup
 *.sqlite3
  
 *.log

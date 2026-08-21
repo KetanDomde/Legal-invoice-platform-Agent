@@ -1,10 +1,29 @@
-import plotly.graph_objects as go
 import streamlit as st
 
-from utils.theme import NAVY, badge, inject_base_css, notice, page_header, sidebar_brand
-from utils.api_client import get_client, require_login, APIError
+from utils.theme import (
+    badge,
+    inject_base_css,
+    notice,
+    page_header,
+    sidebar_brand,
+)
+from utils.api_client import (
+    APIError,
+    get_client,
+    require_login,
+)
 
-st.set_page_config(page_title="Budgets & Alerts | Konverge", page_icon="💰", layout="wide")
+
+# ============================================================================
+# Page setup
+# ============================================================================
+
+st.set_page_config(
+    page_title="Budgets & Alerts | Konverge",
+    page_icon="💰",
+    layout="wide",
+)
+
 inject_base_css()
 sidebar_brand()
 require_login()
@@ -12,82 +31,599 @@ require_login()
 client = get_client()
 user = st.session_state["user"]
 
+
+# ============================================================================
+# Load budget hierarchy
+#
+# Backend returns:
+#
+# Firm
+#   -> Matters
+#       -> Budget
+#       -> Related invoices
+#       -> Budget status
+# ============================================================================
+
 try:
-    budgets = client.list_budgets()
-    matters = {m["matter_id"]: m for m in client.list_matters()}
-    ledger = client.list_budget_ledger()
-    alerts = client.list_alerts()
+    hierarchy = client.get_budget_hierarchy()
+
 except APIError as e:
     st.error(f"Couldn't load budget data: {e.detail}")
     st.stop()
 
-page_header(8, "Budgets & Alerts",
-            "Allocated budgets per matter, ledger history, and threshold alerts across every firm.",
-            extra_badge=badge(f"{len(alerts)} active alert(s)", "orange" if alerts else "green"))
 
-if user["role"] in ("admin", "editor"):
-    with st.expander("➕ Add a budget"):
+# ============================================================================
+# Calculate matters requiring attention
+# ============================================================================
+
+active_alerts = sum(
+    1
+    for firm in hierarchy
+    for matter in firm["matters"]
+    if matter["threshold_reached"] or matter["over_budget"]
+)
+
+
+# ============================================================================
+# Page header
+# ============================================================================
+
+page_header(
+    8,
+    "Budgets & Alerts",
+    (
+        "Automatic budgets created from invoice intake. "
+        "Firm → Matter → Invoice history and adjustments."
+    ),
+    extra_badge=badge(
+        f"{active_alerts} matter(s) needing attention",
+        "orange" if active_alerts else "green",
+    ),
+)
+
+
+# ============================================================================
+# Empty state
+# ============================================================================
+
+if not hierarchy:
+    st.info(
+        "No budget records yet. Upload an invoice with a matter identifier "
+        "to automatically create the Firm, Matter and default $100,000 budget."
+    )
+
+
+# ============================================================================
+# Firm -> Matter hierarchy
+#
+# IMPORTANT:
+# Streamlit does not allow nested expanders.
+#
+# Therefore:
+#
+# Firm
+#   -> Expander
+#       -> Matter selector
+#           -> Selected matter details
+#               -> Invoices
+#               -> Adjustment history
+#               -> Budget adjustment
+#
+# This keeps the hierarchy clean without nesting expanders.
+# ============================================================================
+
+for firm in hierarchy:
+
+    firm_name = firm.get("firm_name", "Unknown Firm")
+    firm_address = firm.get("firm_address")
+    firm_id = firm.get("firm_id")
+
+    matters = firm.get("matters", [])
+
+    # ------------------------------------------------------------------------
+    # Firm header
+    # ------------------------------------------------------------------------
+
+    firm_title = f"🏢 {firm_name}"
+
+    if firm_address:
+        firm_title += f" — {firm_address}"
+
+    # Only one level of expander is used.
+    with st.expander(firm_title, expanded=True):
+
+        # --------------------------------------------------------------------
+        # Firm summary
+        # --------------------------------------------------------------------
+
+        total_invoices = sum(
+            len(matter.get("invoices", []))
+            for matter in matters
+        )
+
+        firm_attention_count = sum(
+            1
+            for matter in matters
+            if matter.get("threshold_reached")
+            or matter.get("over_budget")
+        )
+
+        col1, col2, col3 = st.columns(3)
+
+        col1.metric(
+            "Matters",
+            len(matters),
+        )
+
+        col2.metric(
+            "Invoices",
+            total_invoices,
+        )
+
+        col3.metric(
+            "Matters needing attention",
+            firm_attention_count,
+        )
+
+        st.divider()
+
+        # --------------------------------------------------------------------
+        # No matters
+        # --------------------------------------------------------------------
+
         if not matters:
-            st.info("Create a matter first, on Admin Control.")
+            st.info(
+                "No budget-enabled matters are available for this firm yet."
+            )
+            continue
+
+        # --------------------------------------------------------------------
+        # Matter selector
+        #
+        # We use a selectbox instead of another expander.
+        # This avoids the Streamlit nested-expander exception.
+        # --------------------------------------------------------------------
+
+        matter_options = {
+            matter["matter_id"]: (
+                f"{matter.get('matter_no') or 'Matter'} - "
+                f"{matter.get('matter_name') or 'Unnamed Matter'}"
+            )
+            for matter in matters
+        }
+
+        # If a matter is over budget or threshold reached,
+        # make it the default selected matter.
+        default_matter_id = next(
+            (
+                matter["matter_id"]
+                for matter in matters
+                if matter.get("over_budget")
+                or matter.get("threshold_reached")
+            ),
+            matters[0]["matter_id"],
+        )
+
+        matter_ids = list(matter_options.keys())
+
+        default_index = matter_ids.index(
+            default_matter_id
+        )
+
+        selected_matter_id = st.selectbox(
+            "Select matter",
+            options=matter_ids,
+            index=default_index,
+            format_func=lambda matter_id: matter_options[matter_id],
+            key=f"matter_selector_{firm_id}",
+        )
+
+        # Get the selected matter object.
+        selected_matter = next(
+            matter
+            for matter in matters
+            if matter["matter_id"] == selected_matter_id
+        )
+
+        matter_no = (
+            selected_matter.get("matter_no")
+            or "N/A"
+        )
+
+        matter_name = (
+            selected_matter.get("matter_name")
+            or "Unnamed Matter"
+        )
+
+        budget_id = selected_matter["budget_id"]
+
+        # --------------------------------------------------------------------
+        # Matter title
+        # --------------------------------------------------------------------
+
+        st.markdown(
+            f"### {matter_no} - {matter_name}"
+        )
+
+        # --------------------------------------------------------------------
+        # Budget metrics
+        # --------------------------------------------------------------------
+
+        effective_budget = float(
+            selected_matter.get("allocated", 0)
+        )
+
+        utilized_amount = float(
+            selected_matter.get("utilized", 0)
+        )
+
+        remaining_amount = float(
+            selected_matter.get("remaining", 0)
+        )
+
+        utilization_percentage = float(
+            selected_matter.get("pct_used", 0)
+        )
+
+        threshold_percentage = float(
+            selected_matter.get("threshold_pct", 80)
+        )
+
+        c1, c2, c3, c4 = st.columns(4)
+
+        c1.metric(
+            "Effective budget",
+            f"${effective_budget:,.2f}",
+        )
+
+        c2.metric(
+            "Used",
+            f"${utilized_amount:,.2f}",
+        )
+
+        c3.metric(
+            "Remaining",
+            f"${remaining_amount:,.2f}",
+        )
+
+        c4.metric(
+            "Utilization",
+            f"{utilization_percentage:.1f}%",
+        )
+
+        # --------------------------------------------------------------------
+        # Budget progress
+        # --------------------------------------------------------------------
+
+        progress_value = min(
+            max(utilization_percentage / 100, 0),
+            1.0,
+        )
+
+        st.progress(
+            progress_value,
+            text=(
+                f"Current utilization: "
+                f"{utilization_percentage:.1f}% "
+                f"| Alert threshold: "
+                f"{threshold_percentage:.0f}%"
+            ),
+        )
+
+        # --------------------------------------------------------------------
+        # Budget status
+        # --------------------------------------------------------------------
+
+        if selected_matter.get("over_budget"):
+
+            notice(
+                (
+                    "OVER BUDGET — This matter requires attention. "
+                    "Review the related invoices and adjust the budget only "
+                    "with a documented reason and confirmation."
+                )
+            )
+
+        elif selected_matter.get("threshold_reached"):
+
+            notice(
+                (
+                    "BUDGET THRESHOLD REACHED — Review the related invoices "
+                    "and current budget position."
+                )
+            )
+
         else:
-            matter_lookup = {m["name"]: mid for mid, m in matters.items()}
-            with st.form("new_budget", clear_on_submit=True):
-                matter_label = st.selectbox("Matter", list(matter_lookup.keys()))
-                allocated = st.number_input("Allocated amount ($)", min_value=1.0, step=1000.0, value=10000.0)
-                threshold = st.slider("Alert threshold (%)", 0, 100, 80)
-                if st.form_submit_button("Create budget", type="primary"):
+
+            notice(
+                "Within budget threshold.",
+                success=True,
+            )
+
+        st.divider()
+
+        # ====================================================================
+        # Related invoices
+        # ====================================================================
+
+        st.markdown("#### Related invoices")
+
+        invoices = selected_matter.get(
+            "invoices",
+            [],
+        )
+
+        if invoices:
+
+            invoice_rows = []
+
+            for invoice in invoices:
+
+                amount = float(
+                    invoice.get("amount") or 0
+                )
+
+                remaining_after = (
+                    invoice.get(
+                        "remaining_after_invoice"
+                    )
+                )
+
+                if remaining_after is not None:
+                    remaining_after = float(
+                        remaining_after
+                    )
+
+                attention_required = bool(
+                    invoice.get(
+                        "attention_required",
+                        False,
+                    )
+                )
+
+                budget_status = (
+                    invoice.get(
+                        "budget_status_at_intake"
+                    )
+                    or "N/A"
+                )
+
+                invoice_rows.append(
+                    {
+                        "Invoice No.": (
+                            invoice.get("invoice_no")
+                            or "N/A"
+                        ),
+                        "Invoice Amount": (
+                            f"${amount:,.2f}"
+                        ),
+                        "Invoice Status": (
+                            invoice.get("status")
+                            or "N/A"
+                        ),
+                        "Budget Result": (
+                            budget_status
+                        ),
+                        "Remaining After Invoice": (
+                            (
+                                f"${remaining_after:,.2f}"
+                                if remaining_after is not None
+                                else "N/A"
+                            )
+                        ),
+                        "Needs Attention": (
+                            "Yes"
+                            if attention_required
+                            else "No"
+                        ),
+                    }
+                )
+
+            st.dataframe(
+                invoice_rows,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        else:
+            st.caption(
+                "No invoices are associated with this matter yet."
+            )
+
+        st.divider()
+
+        # ====================================================================
+        # Budget adjustment
+        #
+        # Admin-only.
+        #
+        # Adjustment amount:
+        #   +10000 = increase budget by $10,000
+        #   -5000  = decrease budget by $5,000
+        #
+        # Backend validates:
+        #   - Amount cannot be zero
+        #   - Reason is mandatory
+        #   - Confirmation is mandatory
+        #   - Budget cannot become zero/negative
+        #   - Audit log is created
+        # ====================================================================
+
+        if user.get("role") == "admin":
+
+            st.markdown("#### Adjust budget")
+
+            with st.form(
+                f"adjust_budget_{budget_id}",
+                clear_on_submit=True,
+            ):
+
+                adjustment_amount = st.number_input(
+                    (
+                        "Adjustment amount "
+                        "(+ increase / - decrease)"
+                    ),
+                    value=0.0,
+                    step=1000.0,
+                    key=f"adjustment_amount_{budget_id}",
+                    help=(
+                        "Example: 25000 increases the budget by $25,000. "
+                        "-10000 decreases the budget by $10,000."
+                    ),
+                )
+
+                adjustment_reason = st.text_area(
+                    "Reason for adjustment (required)",
+                    key=f"adjustment_reason_{budget_id}",
+                    placeholder=(
+                        "Example: Additional litigation work approved."
+                    ),
+                )
+
+                adjustment_confirmed = st.checkbox(
+                    (
+                        "I confirm this budget adjustment and understand "
+                        "that it will be recorded in the audit log."
+                    ),
+                    key=f"adjustment_confirmed_{budget_id}",
+                )
+
+                submitted = st.form_submit_button(
+                    "Adjust budget",
+                    type="primary",
+                )
+
+                if submitted:
+
                     try:
-                        client.create_budget(matter_id=matter_lookup[matter_label],
-                                              allocated_amt=allocated, threshold_pct=threshold)
-                        st.success("Budget created.")
+
+                        client.adjust_budget(
+                            budget_id,
+                            adjustment_amount,
+                            adjustment_reason,
+                            adjustment_confirmed,
+                        )
+
+                        st.success(
+                            (
+                                "Budget adjusted successfully. "
+                                "The adjustment history and audit log "
+                                "have been updated."
+                            )
+                        )
+
                         st.rerun()
+
                     except APIError as e:
-                        st.error(e.detail)
 
-if budgets:
-    rows = []
-    for b in budgets:
-        matter = matters.get(b["matter_id"], {})
-        used = sum(l["amount"] for l in ledger if l["budget_id"] == b["budget_id"])
-        rows.append({
-            "matter": matter.get("name", f"Matter {b['matter_id']}"),
-            "allocated": b["allocated_amt"],
-            "used": used,
-        })
-    with st.container(border=True):
-        st.markdown("##### Budget utilization by matter")
-        fig = go.Figure()
-        fig.add_trace(go.Bar(x=[r["matter"] for r in rows], y=[r["allocated"] for r in rows], name="Allocated", marker_color="#E4E6F3"))
-        fig.add_trace(go.Bar(x=[r["matter"] for r in rows], y=[r["used"] for r in rows], name="Used", marker_color=NAVY))
-        fig.update_layout(barmode="overlay", height=280, margin=dict(t=10, b=10, l=10, r=10),
-                           legend=dict(orientation="h", y=-0.2), plot_bgcolor="white")
-        st.plotly_chart(fig, use_container_width=True)
+                        st.error(
+                            f"Budget adjustment failed: {e.detail}"
+                        )
 
-st.markdown("&nbsp;")
+        # ====================================================================
+        # Adjustment history
+        # ====================================================================
 
-for b in budgets:
-    matter = matters.get(b["matter_id"], {})
-    matter_name = matter.get("name", f"Matter {b['matter_id']}")
-    used = sum(l["amount"] for l in ledger if l["budget_id"] == b["budget_id"])
-    pct = (used / b["allocated_amt"] * 100) if b["allocated_amt"] else 0
-    with st.container(border=True):
-        c1, c2 = st.columns([2, 1.4])
-        with c1:
-            st.markdown(f"**{matter_name}**")
-            used_num = f"{used:,.2f}"
-            allocated_num = f"{b['allocated_amt']:,.2f}"
-            st.progress(min(pct / 100, 1.0), text=f"${used_num} of {allocated_num} used ({pct:.0f}%)")
-            if pct >= b["threshold_pct"]:
-                notice(f"Over the {b['threshold_pct']:.0f}% alert threshold — recommend Clarify before Approve on new invoices for this matter.")
-        with c2:
-            entries = [l for l in ledger if l["budget_id"] == b["budget_id"]]
-            st.caption(f"{len(entries)} ledger entr{'y' if len(entries) == 1 else 'ies'}")
-            for e in entries[:4]:
-                st.caption(f"• Invoice #{e['invoice_id']} — ${e['amount']:,.2f} ({e['entry_type']})")
+        try:
 
-if alerts:
-    st.markdown("##### 🔔 All Alerts")
-    for a in alerts:
-        st.warning(a["message"])
-else:
-    st.caption("No alerts fired yet.")
+            adjustments = (
+                client.list_budget_adjustments(
+                    budget_id
+                )
+            )
+
+            if adjustments:
+
+                st.markdown(
+                    "#### Budget adjustment history"
+                )
+
+                adjustment_rows = []
+
+                for adjustment in adjustments:
+
+                    previous_amount = float(
+                        adjustment.get(
+                            "previous_amount"
+                        )
+                        or 0
+                    )
+
+                    adjustment_amount = float(
+                        adjustment.get(
+                            "adjustment_amount"
+                        )
+                        or 0
+                    )
+
+                    new_amount = float(
+                        adjustment.get(
+                            "new_amount"
+                        )
+                        or 0
+                    )
+
+                    adjustment_rows.append(
+                        {
+                            "Type": (
+                                adjustment.get(
+                                    "adjustment_type"
+                                )
+                                or "N/A"
+                            ),
+                            "Previous Budget": (
+                                f"${previous_amount:,.2f}"
+                            ),
+                            "Adjustment": (
+                                f"${adjustment_amount:+,.2f}"
+                            ),
+                            "New Budget": (
+                                f"${new_amount:,.2f}"
+                            ),
+                            "Reason": (
+                                adjustment.get(
+                                    "reason"
+                                )
+                                or "N/A"
+                            ),
+                            "Confirmed": (
+                                "Yes"
+                                if adjustment.get(
+                                    "confirmed"
+                                )
+                                else "No"
+                            ),
+                            "Related Invoice ID": (
+                                adjustment.get(
+                                    "invoice_id"
+                                )
+                                or "N/A"
+                            ),
+                            "Created At": (
+                                adjustment.get(
+                                    "created_at"
+                                )
+                                or "N/A"
+                            ),
+                        }
+                    )
+
+                st.dataframe(
+                    adjustment_rows,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            else:
+
+                st.caption(
+                    "No budget adjustments have been made yet."
+                )
+
+        except APIError:
+
+            # Do not break the complete budget page if adjustment
+            # history cannot be loaded for one matter.
+            st.caption(
+                "Adjustment history is currently unavailable."
+            )

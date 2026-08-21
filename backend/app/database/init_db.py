@@ -56,6 +56,9 @@ def init_db():
             firm = Firm(
                 firm_id=1,
                 name="Sample Outside Counsel LLP",
+                address="123 Legal Ave, Suite 400",
+                normalized_name="sample outside counsel llp",
+                normalized_address="123 legal ave, suite 400",
                 contact_email="contact@samplefirm.com",
                 status="active",
             )
@@ -70,6 +73,7 @@ def init_db():
             matter = Matter(
                 matter_id=1,
                 firm_id=1,
+                matter_no="M-1042",
                 name="Sample Litigation Matter",
                 owner="Trinkesh",
                 status="open",
@@ -84,7 +88,7 @@ def init_db():
         if budget is None:
             budget = Budget(
                 matter_id=1,
-                allocated_amt=50000.0,
+                allocated_amt=100000.0,
                 threshold_pct=80,
             )
             db.add(budget)

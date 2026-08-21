@@ -90,6 +90,7 @@ def _normalize_matter_id(matter_id: str) -> str:
 async def submit_invoice(
     file: UploadFile = File(...),
     matter_no: str | None = Form(None, description="Optional manual override — normally extracted from the PDF."),
+    firm_address: str | None = Form(None, description="Optional firm address fallback when extraction cannot read it."),
     firm_name: str | None = Form(
         None,
         description=(
@@ -105,7 +106,7 @@ async def submit_invoice(
     saved_path = _save_upload_to_disk(file, content)
 
     try:
-        final_state = call_run_invoice_graph(saved_path, matter_no_override=matter_no, firm_name=firm_name)
+        final_state = call_run_invoice_graph(saved_path, matter_no_override=matter_no, firm_name=firm_name, firm_address=firm_address)
     except InvoiceAlreadyExistsError as e:
         return JSONResponse(
             status_code=409,

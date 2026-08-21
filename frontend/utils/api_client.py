@@ -110,6 +110,25 @@ class APIClient:
     def list_budgets(self):
         return self._call("GET", "/budgets")
 
+    def list_budget_summaries(self):
+        """
+        Canonical budget utilization for all accessible budgets.
+        """
+        return self._call(
+            "GET",
+            "/budgets/summary",
+        )
+
+
+    def get_budget_summary(self, budget_id: int):
+        """
+        Canonical utilization for one budget.
+        """
+        return self._call(
+            "GET",
+            f"/budgets/{budget_id}/summary",
+        )
+
     def create_budget(self, matter_id, allocated_amt, threshold_pct=80):
         return self._call("POST", "/budgets", json={
             "matter_id": matter_id, "allocated_amt": allocated_amt, "threshold_pct": threshold_pct})
@@ -154,6 +173,21 @@ class APIClient:
     def get_invoice(self, invoice_id: int):
         return self._call("GET", f"/invoices/{invoice_id}")
 
+    def get_invoice_budget_context(
+    self,
+    invoice_id: int,
+):
+        """
+        Return complete budget context for one invoice.
+
+        The backend performs all budget calculations so the Streamlit page
+        does not independently calculate utilization or projected spend.
+        """
+        return self._call(
+            "GET",
+            f"/invoices/{invoice_id}/budget-context",
+        )
+
     def list_invoices(self, matter_id=None, firm_id=None):
         params = {}
         if matter_id is not None:
@@ -165,6 +199,17 @@ class APIClient:
     
     def list_line_items(self, invoice_id=None):
         return self._call("GET", "/line-items", params={"invoice_id": invoice_id})
+
+    # --- automatic budget management -----------------------------------------
+    def get_budget_hierarchy(self):
+        return self._call("GET", "/budgets/hierarchy")
+
+    def adjust_budget(self, budget_id: int, adjustment_amount: float, reason: str, confirmed: bool, invoice_id: int | None = None):
+        payload={"adjustment_amount": adjustment_amount, "reason": reason, "confirmed": confirmed, "invoice_id": invoice_id}
+        return self._call("POST", f"/budgets/{budget_id}/adjustments", json=payload)
+
+    def list_budget_adjustments(self, budget_id: int):
+        return self._call("GET", f"/budgets/{budget_id}/adjustments")
 
     # --- budget ledger / alerts ----------------------------------------------
     def list_budget_ledger(self, budget_id=None, invoice_id=None):
@@ -190,9 +235,31 @@ class APIClient:
         return self._call("POST", f"/review/{invoice_id}/clarify", params={"reason": reason})
 
     # --- validation ------------------------------------------------------------
-    def validate_invoice(self, invoice_id, budget_valid=None, duplicate_flag=False, confidence_score=None):
-        return self._call("POST", f"/validation/{invoice_id}", params={
-            "budget_valid": budget_valid, "duplicate_flag": duplicate_flag, "confidence_score": confidence_score})
+
+    def validate_invoice(
+        self,
+        invoice_id,
+        duplicate_flag=None,
+        confidence_score=None,
+    ):
+        """
+        Re-run validation.
+
+        Budget validity is never supplied by the frontend. The backend calculates
+        it from the canonical budget ledger.
+        """
+
+        return self._call(
+            "POST",
+            f"/validation/{invoice_id}",
+            params={
+                "duplicate_flag": duplicate_flag,
+                "confidence_score": confidence_score,
+            },
+        )
+    # def validate_invoice(self, invoice_id, budget_valid=None, duplicate_flag=False, confidence_score=None):
+    #     return self._call("POST", f"/validation/{invoice_id}", params={
+    #         "budget_valid": budget_valid, "duplicate_flag": duplicate_flag, "confidence_score": confidence_score})
 
     # --- audit logs ---------------------------------------------------------------
     def list_audit_logs(self, invoice_id=None, user_id=None, filter: str | None = None, limit: int | None= None):

@@ -78,7 +78,8 @@ class InvoiceGraphState(TypedDict, total=False):
     db: Session
     file_path: str
     matter_no_override: str | None   # NEW
-    firm_name: str | None            # NEW — user-supplied, used when creating a new matter's firm
+    firm_name: str | None            # user-supplied fallback
+    firm_address: str | None         # user-supplied fallback
     matter_id: int
     firm_id: int
     raw_text: str
@@ -307,6 +308,8 @@ def extract_invoice_fields_mock(raw_text: str) -> dict:
 
         "matter_name": matter_match.group(2).strip() if matter_match else None,
         "firm_name": firm_match.group(1).strip() if firm_match else None,
+        # Most legal invoices place the address immediately below the firm letterhead.
+        "firm_address": (raw_text.splitlines()[1].strip() if len(raw_text.splitlines()) > 1 and raw_text.splitlines()[1].strip() else None),
         "total_amount": total_amount,
         "line_items": line_items,
     }
@@ -334,6 +337,7 @@ def _build_extraction_prompt(raw_text: str) -> str:
         '  "matter_no": string or null (the matter/case identifier printed on the invoice, e.g. "MAT-771B"),\n'
         '  "matter_name": string or null (the matter/case name, e.g. "Nova Retail v. Green Market"),\n'
         '  "firm_name": string or null (the firm/org name, e.g. "ABC Legal Associates"),\n'
+        '  "firm_address": string or null (the mailing address shown for the firm),\n'
         
         '  "total_amount": number (no currency symbol, no commas),\n'
         '  "line_items": [\n'
@@ -412,6 +416,7 @@ def _normalize_extracted_fields(data: dict) -> dict:
         "matter_no": (data.get("matter_no") or "").strip() or None,
         "matter_name": data.get("matter_name"),
         "firm_name": data.get("firm_name"),
+        "firm_address": data.get("firm_address"),
         "total_amount": _to_float(data.get("total_amount")),
         "line_items": line_items,
     }
@@ -535,7 +540,8 @@ def resolve_matter(state: InvoiceGraphState) -> InvoiceGraphState:
 
     extracted = state["extracted"]
     matter_no = extracted.get("matter_no") or state.get("matter_no_override")
-    firm_name = extracted.get("firm_name")
+    firm_name = extracted.get("firm_name") or state.get("firm_name")
+    firm_address = extracted.get("firm_address") or state.get("firm_address")
 
     if not matter_no:
         # No matter identifier extractable at all — can't proceed automatically.
@@ -544,7 +550,7 @@ def resolve_matter(state: InvoiceGraphState) -> InvoiceGraphState:
         return state
 
     matter = get_or_create_matter(
-        state["db"], matter_no, extracted.get("matter_name"), firm_name=firm_name
+        state["db"], matter_no, extracted.get("matter_name"), firm_name=firm_name, firm_address=firm_address
     )
     state["matter_id"] = matter.matter_id
     state["firm_id"] = matter.firm_id
@@ -785,6 +791,7 @@ def run_invoice_graph(
     file_path: str,
     matter_no_override: str | None = None,
     firm_name: str | None = None,
+    firm_address: str | None = None,
 ) -> InvoiceGraphState:
     graph = build_invoice_graph()
     return graph.invoke(
@@ -793,6 +800,7 @@ def run_invoice_graph(
             "file_path": file_path,
             "matter_no_override": matter_no_override,
             "firm_name": firm_name,
+            "firm_address": firm_address,
             "audit_trail": [],
         }
     )
@@ -804,13 +812,13 @@ def draw_graph():
     with open("graph_diagram.png", "wb") as f:
         f.write(png_bytes)
   
-def call_run_invoice_graph(filepath, matter_no_override: str | None = None, firm_name: str | None = None):
+def call_run_invoice_graph(filepath, matter_no_override: str | None = None, firm_name: str | None = None, firm_address: str | None = None):
     from app.database.database import SessionLocal
 
     db = SessionLocal()
     try:
         state = run_invoice_graph(
-            db, file_path=filepath, matter_no_override=matter_no_override, firm_name=firm_name
+            db, file_path=filepath, matter_no_override=matter_no_override, firm_name=firm_name, firm_address=firm_address
         )
         db.commit()
         return state

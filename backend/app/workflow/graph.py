@@ -91,6 +91,7 @@ class InvoiceGraphState(TypedDict, total=False):
     final_status: str
     audit_trail: list[str]
     error: str
+    inv_changes: dict
     
     
 def _ocr_pdf_pages(doc) -> str:
@@ -753,6 +754,15 @@ def human_review(state: InvoiceGraphState) -> InvoiceGraphState:
 
 def log_for_review(state: InvoiceGraphState) -> InvoiceGraphState:
     _log(state, "Human-review queue entry recorded through invoice status/audit log.")
+
+    from app.database.invoice_repository import InvoiceAlreadyExistsError
+    if state["inv_changes"]:
+        raise InvoiceAlreadyExistsError(
+                    invoice_no=state["extracted"]["invoice_no"],
+                    matter_id=str(state["matter_id"]),
+                    inv_changes=state["inv_changes"],
+                )
+
     return state
 
 

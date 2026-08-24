@@ -133,34 +133,72 @@ def validate_relationships(db: Session, matter_id: int, firm_id: int) -> tuple[M
 
 
 def persist_extracted_invoice(
-    db: Session,
-    *,
-    matter_id: int,
-    firm_id: int,
-    fields: dict,
-    confidence: float,
+    state
 ) -> Invoice:
+    db = state["db"]
+    matter_id = state["matter_id"]
+    firm_id = state["firm_id"]
+    fields = state["extracted"]
+    duplicate_inv_id = state["validation"]["duplicate_invoice_id"]
+    confidence = state["confidence_score"]
+
     validate_relationships(db, matter_id, firm_id)
     parsed = ExtractedInvoice.model_validate(fields)
-    invoice = Invoice(
-        matter_id=matter_id,
-        firm_id=firm_id,
-        invoice_no=parsed.invoice_no,
-        invoice_date=parsed.invoice_date,
-        total_amount=parsed.total_amount,
-        status="submitted",
-        confidence_score=confidence,
-    )
-    invoice.line_items = [
-        LineItem(
-            timekeeper=item.timekeeper,
-            hours=item.hours,
-            rate=item.rate,
-            amount=item.amount,
+
+    duplicate = db.get(Invoice, duplicate_inv_id)
+    orig_inv = duplicate
+    inv_changes = diff_invoices(orig_inv, parsed) if orig_inv is not None else {}
+    state["inv_changes"] = inv_changes
+
+    if duplicate_inv_id and inv_changes:    
+        duplicate = db.get(Invoice, duplicate_inv_id)
+        # 2. Update scalar attributes directly
+        duplicate.matter_id = matter_id
+        duplicate.firm_id = firm_id
+        duplicate.invoice_no = parsed.invoice_no
+        duplicate.invoice_date = parsed.invoice_date
+        duplicate.total_amount = parsed.total_amount
+        duplicate.status = "submitted"
+        duplicate.confidence_score = confidence
+
+        # 3. Replace the relationship list
+        duplicate.line_items = [
+            LineItem(
+                timekeeper=item.timekeeper,
+                hours=item.hours,
+                rate=item.rate,
+                amount=item.amount,
+            )
+            for item in parsed.line_items
+        ]
+        invoice = duplicate
+    elif duplicate_inv_id:
+        db.rollback()
+        # duplicate
+        raise InvoiceAlreadyExistsError(
+            invoice_no=parsed.invoice_no,
+            matter_id=str(matter_id)
         )
-        for item in parsed.line_items
-    ]
-    db.add(invoice)
+    else:
+        invoice = Invoice(
+            matter_id=matter_id,
+            firm_id=firm_id,
+            invoice_no=parsed.invoice_no,
+            invoice_date=parsed.invoice_date,
+            total_amount=parsed.total_amount,
+            status="submitted",
+            confidence_score=confidence,
+        )
+        invoice.line_items = [
+            LineItem(
+                timekeeper=item.timekeeper,
+                hours=item.hours,
+                rate=item.rate,
+                amount=item.amount,
+            )
+            for item in parsed.line_items
+        ]
+        db.add(invoice)
     try:
         db.flush()
     except IntegrityError as e:
@@ -186,6 +224,7 @@ def persist_extracted_invoice(
             matter_id=str(matter_id),
             inv_changes=inv_changes,
         ) from e
+
     return invoice
 
 

@@ -1,151 +1,13 @@
-# from __future__ import annotations
-
-# from sqlalchemy.orm import Session
-
-# from app.models import Invoice
-# from app.services.invoice import add_audit_log, get_budget_summary
-
-
-# def post_approved_invoice_to_budget(db: Session, invoice: Invoice) -> dict:
-#     """Post an approved invoice to the budget ledger.
-
-#     Kept in the approval workflow so approval has one clear integration point.
-#     The function is intentionally safe when a matter has no configured budget.
-#     """
-#     from app.models import Budget, BudgetLedger
-
-#     budget = (
-#         db.query(Budget)
-#         .filter(Budget.matter_id == invoice.matter_id)
-#         .first()
-#     )
-#     if budget is None:
-#         return {
-#             "invoice_id": invoice.invoice_id,
-#             "amount_posted": invoice.total_amount,
-#             "status": "no_budget_configured",
-#         }
-
-#     existing = (
-#         db.query(BudgetLedger)
-#         .filter(
-#             BudgetLedger.invoice_id == invoice.invoice_id,
-#             BudgetLedger.entry_type == "invoice_approved",
-#         )
-#         .first()
-#     )
-#     if existing is None:
-#         db.add(
-#             BudgetLedger(
-#                 budget_id=budget.budget_id,
-#                 invoice_id=invoice.invoice_id,
-#                 amount=invoice.total_amount,
-#                 entry_type="invoice_approved",
-#             )
-#         )
-
-#     return {
-#         "invoice_id": invoice.invoice_id,
-#         "amount_posted": invoice.total_amount,
-#         "status": "posted",
-#     }
-
-
-# def approve_invoice(
-#     db: Session,
-#     invoice: Invoice,
-#     user_id: int | None = None,
-#     notes: str | None = None,
-# ) -> Invoice:
-#     """Approve a pending-review invoice and post it to the budget."""
-#     if invoice.status != "pending_review":
-#         raise ValueError("Only invoices pending review can be approved.")
-
-#     # This symbol is deliberately called through this module so existing
-#     # integrations/tests can replace the budget-posting step safely.
-#     budget_result = post_approved_invoice_to_budget(db=db, invoice=invoice)
-
-#     old_status = invoice.status
-#     invoice.status = "approved"
-#     db.add(invoice)
-
-#     audit_note = (
-#         f"Status changed from '{old_status}' to 'approved'."
-#     )
-#     if notes:
-#         audit_note += f" Reason: {notes}"
-#     if budget_result.get("status"):
-#         audit_note += f" Budget: {budget_result['status']}."
-
-#     add_audit_log(
-#         db,
-#         action="approved",
-#         user_id=user_id,
-#         invoice_id=invoice.invoice_id,
-#         notes=audit_note,
-#     )
-#     db.commit()
-#     db.refresh(invoice)
-#     return invoice
-
-
 from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
 from app.models import Invoice
+from app.services.budget import (
+    get_invoice_budget_context,
+    post_approved_invoice_to_budget,
+)
 from app.services.invoice import add_audit_log
-
-
-def post_approved_invoice_to_budget(
-    db: Session,
-    invoice: Invoice,
-) -> dict:
-
-    from app.models import Budget, BudgetLedger
-
-    budget = (
-        db.query(Budget)
-        .filter(
-            Budget.matter_id == invoice.matter_id
-        )
-        .first()
-    )
-
-    if budget is None:
-        return {
-            "invoice_id": invoice.invoice_id,
-            "amount_posted": invoice.total_amount,
-            "status": "no_budget_configured",
-        }
-
-    existing = (
-        db.query(BudgetLedger)
-        .filter(
-            BudgetLedger.invoice_id
-            == invoice.invoice_id,
-            BudgetLedger.entry_type
-            == "invoice_approved",
-        )
-        .first()
-    )
-
-    if existing is None:
-
-        db.add(
-            BudgetLedger(
-                budget_id=budget.budget_id,
-                invoice_id=invoice.invoice_id,
-                amount=invoice.total_amount,
-                entry_type="invoice_approved",
-            )
-        )
-
-    return {
-        "invoice_id": invoice.invoice_id,
-        "amount_posted": invoice.total_amount,
-        "status": "posted",
-    }
 
 
 def auto_approve_invoice(
@@ -153,16 +15,34 @@ def auto_approve_invoice(
     invoice: Invoice,
 ) -> Invoice:
     """
-    System-generated approval.
+    System approval.
 
-    Used only when the LangGraph validation rules
-    have determined that the invoice qualifies
-    for automatic approval.
+    Auto approval is intentionally strict:
+      - invoice must be submitted,
+      - a budget must exist,
+      - the invoice must remain within the allocated budget.
+
+    An over-budget invoice must never reach this path.
     """
 
     if invoice.status != "submitted":
         raise ValueError(
             "Only submitted invoices can be auto-approved."
+        )
+
+    budget_context = get_invoice_budget_context(
+        db=db,
+        invoice=invoice,
+    )
+
+    if not budget_context["has_budget"]:
+        raise ValueError(
+            "Invoice cannot be auto-approved because this matter has no configured budget."
+        )
+
+    if budget_context["projected_over_budget"]:
+        raise ValueError(
+            "Invoice cannot be auto-approved because it exceeds the remaining budget."
         )
 
     budget_result = post_approved_invoice_to_budget(
@@ -171,15 +51,14 @@ def auto_approve_invoice(
     )
 
     old_status = invoice.status
-
     invoice.status = "approved"
 
-    db.add(invoice)
+    summary = budget_result["summary"]
 
     note = (
-        f"Status changed from '{old_status}' "
-        f"to 'approved' automatically. "
-        f"Budget: {budget_result['status']}."
+        f"Status changed from '{old_status}' to 'approved' automatically. "
+        f"Budget utilization is now {summary['pct_used']:.1f}%. "
+        f"Remaining budget is ${summary['remaining']:,.2f}."
     )
 
     add_audit_log(
@@ -202,10 +81,39 @@ def approve_invoice(
     user_id: int | None = None,
     notes: str | None = None,
 ) -> Invoice:
+    """
+    Human approval.
+
+    Product rules:
+      1. A matter with no budget cannot be approved.
+      2. An invoice within budget can be approved normally.
+      3. An over-budget invoice can be approved as a human override.
+      4. An over-budget override requires a non-empty reason.
+      5. Every approval is posted to BudgetLedger exactly once.
+    """
 
     if invoice.status != "pending_review":
         raise ValueError(
             "Only invoices pending review can be approved."
+        )
+
+    budget_context = get_invoice_budget_context(
+        db=db,
+        invoice=invoice,
+    )
+
+    if not budget_context["has_budget"]:
+        raise ValueError(
+            "Cannot approve this invoice because the matter has no configured budget. "
+            "Create a budget first, then re-run the review."
+        )
+
+    override_required = budget_context["projected_over_budget"]
+    clean_notes = (notes or "").strip()
+
+    if override_required and not clean_notes:
+        raise ValueError(
+            "Approval reason is required when overriding the remaining budget."
         )
 
     budget_result = post_approved_invoice_to_budget(
@@ -214,27 +122,33 @@ def approve_invoice(
     )
 
     old_status = invoice.status
-
     invoice.status = "approved"
 
-    db.add(invoice)
+    summary = budget_result["summary"]
 
-    audit_note = (
-        f"Status changed from '{old_status}' "
-        f"to 'approved'."
-    )
+    if override_required:
+        action = "approved_budget_override"
+        audit_note = (
+            f"Status changed from '{old_status}' to 'approved' using a budget override. "
+            f"Reason: {clean_notes} "
+            f"Budget utilization is now {summary['pct_used']:.1f}%. "
+            f"Remaining budget is ${summary['remaining']:,.2f}."
+        )
+    else:
+        action = "approved"
+        audit_note = (
+            f"Status changed from '{old_status}' to 'approved'. "
+            f"Budget utilization is now {summary['pct_used']:.1f}%. "
+            f"Remaining budget is ${summary['remaining']:,.2f}."
+        )
 
-    if notes:
-        audit_note += f" Reason: {notes}"
-
-    audit_note += (
-        f" Budget: {budget_result['status']}."
-    )
+        if clean_notes:
+            audit_note += f" Reviewer notes: {clean_notes}"
 
     add_audit_log(
         db=db,
-        action="approved",
-        user_id=user_id,
+        action=action,
+        user_id=user_id if user_id is not None else -1,
         invoice_id=invoice.invoice_id,
         notes=audit_note,
     )

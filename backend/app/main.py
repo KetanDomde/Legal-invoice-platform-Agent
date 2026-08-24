@@ -22,7 +22,7 @@ from app.database.init_db import init_db,delete_db
 async def lifespan(app: FastAPI):
     init_db()
     yield
-    delete_db()
+    # Keep SQLite data on shutdown. Budget history and audit records must persist.
 
 
 
@@ -45,6 +45,7 @@ async def request_id_middleware(request: Request, call_next):
     logger.info(f"Incoming request: {request.method} {request.url.path}")
     try:
         response = await call_next(request)
+        response.headers["X-Request-ID"] = req_id
         logger.info(f"Request completed with status: {response.status_code}")
         return response
     finally:
@@ -76,4 +77,3 @@ def root():
 @app.get("/health", tags=["Health"])
 def health():
     return {"status": "ok"}
-

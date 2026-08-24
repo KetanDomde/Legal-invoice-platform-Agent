@@ -315,6 +315,12 @@ def artifact_row(label: str, right_html: str) -> None:
 
 
 def sidebar_brand() -> None:
+    try:
+        from utils.notifications import render_flashes
+        render_flashes()
+    except Exception:
+        pass
+
     st.sidebar.markdown(
         """
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">

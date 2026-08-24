@@ -211,7 +211,14 @@ def persist_extracted_invoice(
         # aborted state after a failed flush, so any query on it (e.g.
         # find_duplicate_invoice below) would raise PendingRollbackError.
         db.rollback()
-        # duplicate
+        org_inv = find_duplicate_invoice(
+            db,
+            matter_id=matter_id,
+            invoice_no=parsed.invoice_no,
+            total_amount=float(parsed.total_amount or 0),
+        )
+        org_inv = get_duplicate_invoice(org_inv)
+        inv_changes = diff_invoices(org_inv, parsed) if org_inv is not None else {}
         raise InvoiceAlreadyExistsError(
             invoice_no=parsed.invoice_no,
             matter_id=str(matter_id),

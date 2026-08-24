@@ -14,6 +14,7 @@ from utils.api_client import (
     APIError,
 )
 from utils.invoice_picker import pick_invoice
+from utils.notifications import flash
 
 
 st.set_page_config(
@@ -243,10 +244,10 @@ with right:
                             confidence_score=confidence_override,
                         )
 
-                        st.success(
-                            f"Decision: "
-                            f"{result['decision']} — "
-                            f"{', '.join(result.get('reasons', []))}"
+                        level = "success" if result.get("decision") == "auto_approved" else "warning"
+                        flash(
+                            f"Decision: {result['decision']} — {', '.join(result.get('reasons', []))}",
+                            level,
                         )
 
                         st.session_state[

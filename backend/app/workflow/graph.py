@@ -663,11 +663,24 @@ def persist_invoice(state: InvoiceGraphState) -> InvoiceGraphState:
         fields=state["extracted"],
         confidence=state["confidence_score"],
     )
+
+    # Persist the immutable intake snapshot immediately after the invoice gets
+    # a real id. The snapshot powers the budget decision/history UI and must
+    # exist before the route can auto-approve or send the invoice to review.
+    from app.models import Budget
+    from app.services.budget_management import apply_intake_snapshot
+    budget = state["db"].query(Budget).filter(Budget.matter_id == invoice.matter_id).first()
+    if budget is not None:
+        apply_intake_snapshot(state["db"], invoice, budget, user_id=-1)
+
     result = state["validation"]
     invoice.budget_valid = result["budget_ok"]
     invoice.duplicate_flag = result["duplicate"]
     invoice.validation_status = "passed" if result["validation_passed"] else "failed"
     invoice.validation_message = "; ".join(result["reasons"])
+    state["validation_passed"] = result["validation_passed"]
+    state["validation_reason"] = invoice.validation_message
+    state["is_duplicate"] = result["duplicate"]
     state["invoice_id"] = invoice.invoice_id
     state["db"].flush()
     _log(state, f"Invoice '{invoice.invoice_no}' persisted with id={invoice.invoice_id} and {len(invoice.line_items)} line items.")

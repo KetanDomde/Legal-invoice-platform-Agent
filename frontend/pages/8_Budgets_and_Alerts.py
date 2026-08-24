@@ -1,3 +1,4 @@
+import pandas as pd
 import streamlit as st
 
 from utils.theme import (
@@ -12,11 +13,12 @@ from utils.api_client import (
     get_client,
     require_login,
 )
+from utils.alert_cards import render_alert_cards
+from utils.notifications import (
+    flash,
+    show_flash_messages,
+)
 
-
-# ============================================================================
-# Page setup
-# ============================================================================
 
 st.set_page_config(
     page_title="Budgets & Alerts | Konverge",
@@ -28,602 +30,449 @@ inject_base_css()
 sidebar_brand()
 require_login()
 
+# Show queued floating notifications immediately after the rerun.
+show_flash_messages()
+
 client = get_client()
 user = st.session_state["user"]
 
 
-# ============================================================================
-# Load budget hierarchy
-#
-# Backend returns:
-#
-# Firm
-#   -> Matters
-#       -> Budget
-#       -> Related invoices
-#       -> Budget status
-# ============================================================================
-
 try:
-    hierarchy = client.get_budget_hierarchy()
+    hierarchy = client.get_budget_hierarchy() or []
+    active_alerts = client.list_alerts(
+        active_only=True
+    ) or []
 
-except APIError as e:
-    st.error(f"Couldn't load budget data: {e.detail}")
+except APIError as exc:
+    st.error(
+        f"Couldn't load budget data: {exc.detail}"
+    )
     st.stop()
 
-
-# ============================================================================
-# Calculate matters requiring attention
-# ============================================================================
-
-active_alerts = sum(
-    1
-    for firm in hierarchy
-    for matter in firm["matters"]
-    if matter["threshold_reached"] or matter["over_budget"]
-)
-
-
-# ============================================================================
-# Page header
-# ============================================================================
 
 page_header(
     8,
     "Budgets & Alerts",
     (
-        "Automatic budgets created from invoice intake. "
-        "Firm → Matter → Invoice history and adjustments."
+        "Current budget position, related invoices, adjustment history, "
+        "and unresolved alerts in one place."
     ),
     extra_badge=badge(
-        f"{active_alerts} matter(s) needing attention",
+        f"{len(active_alerts)} active alert(s)",
         "orange" if active_alerts else "green",
     ),
 )
 
 
-# ============================================================================
-# Empty state
-# ============================================================================
-
-if not hierarchy:
-    st.info(
-        "No budget records yet. Upload an invoice with a matter identifier "
-        "to automatically create the Firm, Matter and default $100,000 budget."
-    )
+left, right = st.columns([3.2, 1])
 
 
 # ============================================================================
-# Firm -> Matter hierarchy
-#
-# IMPORTANT:
-# Streamlit does not allow nested expanders.
-#
-# Therefore:
-#
-# Firm
-#   -> Expander
-#       -> Matter selector
-#           -> Selected matter details
-#               -> Invoices
-#               -> Adjustment history
-#               -> Budget adjustment
-#
-# This keeps the hierarchy clean without nesting expanders.
+# ACTIVE ALERT CARDS
 # ============================================================================
 
-for firm in hierarchy:
+with right:
+    with st.container(border=True):
+        st.markdown("#### 🔔 Active Alerts")
 
-    firm_name = firm.get("firm_name", "Unknown Firm")
-    firm_address = firm.get("firm_address")
-    firm_id = firm.get("firm_id")
-
-    matters = firm.get("matters", [])
-
-    # ------------------------------------------------------------------------
-    # Firm header
-    # ------------------------------------------------------------------------
-
-    firm_title = f"🏢 {firm_name}"
-
-    if firm_address:
-        firm_title += f" — {firm_address}"
-
-    # Only one level of expander is used.
-    with st.expander(firm_title, expanded=True):
-
-        # --------------------------------------------------------------------
-        # Firm summary
-        # --------------------------------------------------------------------
-
-        total_invoices = sum(
-            len(matter.get("invoices", []))
-            for matter in matters
+        dismissed = render_alert_cards(
+            client,
+            active_alerts,
+            key_prefix="budgets_alert",
+            empty_message="No active budget alerts.",
+            compact=True,
         )
 
-        firm_attention_count = sum(
-            1
-            for matter in matters
-            if matter.get("threshold_reached")
-            or matter.get("over_budget")
+        if dismissed:
+            st.rerun()
+
+
+# ============================================================================
+# BUDGET HIERARCHY
+# ============================================================================
+
+with left:
+    if not hierarchy:
+        st.info(
+            "No matters with budgets are available yet. "
+            "Budgets are created automatically from invoice intake."
         )
 
-        col1, col2, col3 = st.columns(3)
-
-        col1.metric(
-            "Matters",
-            len(matters),
-        )
-
-        col2.metric(
-            "Invoices",
-            total_invoices,
-        )
-
-        col3.metric(
-            "Matters needing attention",
-            firm_attention_count,
-        )
-
-        st.divider()
+    for firm in hierarchy:
 
         # --------------------------------------------------------------------
-        # No matters
-        # --------------------------------------------------------------------
-
-        if not matters:
-            st.info(
-                "No budget-enabled matters are available for this firm yet."
-            )
-            continue
-
-        # --------------------------------------------------------------------
-        # Matter selector
+        # Open only firms requiring admin attention.
         #
-        # We use a selectbox instead of another expander.
-        # This avoids the Streamlit nested-expander exception.
+        # A firm opens when it has:
+        # - the newest invoice,
+        # - an over-budget matter,
+        # - a matter at/above its threshold,
+        # - an active alert.
+        #
+        # All other firms stay collapsed.
         # --------------------------------------------------------------------
+        expanded = bool(
+            firm.get("requires_attention", False)
+        )
 
-        matter_options = {
-            matter["matter_id"]: (
-                f"{matter.get('matter_no') or 'Matter'} - "
-                f"{matter.get('matter_name') or 'Unnamed Matter'}"
-            )
-            for matter in matters
-        }
-
-        # If a matter is over budget or threshold reached,
-        # make it the default selected matter.
-        default_matter_id = next(
+        with st.expander(
             (
-                matter["matter_id"]
-                for matter in matters
-                if matter.get("over_budget")
-                or matter.get("threshold_reached")
+                f"🏢 {firm['firm_name']}  ·  "
+                f"{len(firm['matters'])} matter(s)"
             ),
-            matters[0]["matter_id"],
-        )
-
-        matter_ids = list(matter_options.keys())
-
-        default_index = matter_ids.index(
-            default_matter_id
-        )
-
-        selected_matter_id = st.selectbox(
-            "Select matter",
-            options=matter_ids,
-            index=default_index,
-            format_func=lambda matter_id: matter_options[matter_id],
-            key=f"matter_selector_{firm_id}",
-        )
-
-        # Get the selected matter object.
-        selected_matter = next(
-            matter
-            for matter in matters
-            if matter["matter_id"] == selected_matter_id
-        )
-
-        matter_no = (
-            selected_matter.get("matter_no")
-            or "N/A"
-        )
-
-        matter_name = (
-            selected_matter.get("matter_name")
-            or "Unnamed Matter"
-        )
-
-        budget_id = selected_matter["budget_id"]
-
-        # --------------------------------------------------------------------
-        # Matter title
-        # --------------------------------------------------------------------
-
-        st.markdown(
-            f"### {matter_no} - {matter_name}"
-        )
-
-        # --------------------------------------------------------------------
-        # Budget metrics
-        # --------------------------------------------------------------------
-
-        effective_budget = float(
-            selected_matter.get("allocated", 0)
-        )
-
-        utilized_amount = float(
-            selected_matter.get("utilized", 0)
-        )
-
-        remaining_amount = float(
-            selected_matter.get("remaining", 0)
-        )
-
-        utilization_percentage = float(
-            selected_matter.get("pct_used", 0)
-        )
-
-        threshold_percentage = float(
-            selected_matter.get("threshold_pct", 80)
-        )
-
-        c1, c2, c3, c4 = st.columns(4)
-
-        c1.metric(
-            "Effective budget",
-            f"${effective_budget:,.2f}",
-        )
-
-        c2.metric(
-            "Used",
-            f"${utilized_amount:,.2f}",
-        )
-
-        c3.metric(
-            "Remaining",
-            f"${remaining_amount:,.2f}",
-        )
-
-        c4.metric(
-            "Utilization",
-            f"{utilization_percentage:.1f}%",
-        )
-
-        # --------------------------------------------------------------------
-        # Budget progress
-        # --------------------------------------------------------------------
-
-        progress_value = min(
-            max(utilization_percentage / 100, 0),
-            1.0,
-        )
-
-        st.progress(
-            progress_value,
-            text=(
-                f"Current utilization: "
-                f"{utilization_percentage:.1f}% "
-                f"| Alert threshold: "
-                f"{threshold_percentage:.0f}%"
-            ),
-        )
-
-        # --------------------------------------------------------------------
-        # Budget status
-        # --------------------------------------------------------------------
-
-        if selected_matter.get("over_budget"):
-
-            notice(
-                (
-                    "OVER BUDGET — This matter requires attention. "
-                    "Review the related invoices and adjust the budget only "
-                    "with a documented reason and confirmation."
-                )
-            )
-
-        elif selected_matter.get("threshold_reached"):
-
-            notice(
-                (
-                    "BUDGET THRESHOLD REACHED — Review the related invoices "
-                    "and current budget position."
-                )
-            )
-
-        else:
-
-            notice(
-                "Within budget threshold.",
-                success=True,
-            )
-
-        st.divider()
-
-        # ====================================================================
-        # Related invoices
-        # ====================================================================
-
-        st.markdown("#### Related invoices")
-
-        invoices = selected_matter.get(
-            "invoices",
-            [],
-        )
-
-        if invoices:
-
-            invoice_rows = []
-
-            for invoice in invoices:
-
-                amount = float(
-                    invoice.get("amount") or 0
+            expanded=expanded,
+        ):
+            if firm.get("firm_address"):
+                st.caption(
+                    firm["firm_address"]
                 )
 
-                remaining_after = (
-                    invoice.get(
-                        "remaining_after_invoice"
-                    )
+            for matter in firm["matters"]:
+
+                title = (
+                    f"{matter.get('matter_no') or 'Matter'} "
+                    f"— {matter['matter_name']}"
                 )
-
-                if remaining_after is not None:
-                    remaining_after = float(
-                        remaining_after
-                    )
-
-                attention_required = bool(
-                    invoice.get(
-                        "attention_required",
-                        False,
-                    )
-                )
-
-                budget_status = (
-                    invoice.get(
-                        "budget_status_at_intake"
-                    )
-                    or "N/A"
-                )
-
-                invoice_rows.append(
-                    {
-                        "Invoice No.": (
-                            invoice.get("invoice_no")
-                            or "N/A"
-                        ),
-                        "Invoice Amount": (
-                            f"${amount:,.2f}"
-                        ),
-                        "Invoice Status": (
-                            invoice.get("status")
-                            or "N/A"
-                        ),
-                        "Budget Result": (
-                            budget_status
-                        ),
-                        "Remaining After Invoice": (
-                            (
-                                f"${remaining_after:,.2f}"
-                                if remaining_after is not None
-                                else "N/A"
-                            )
-                        ),
-                        "Needs Attention": (
-                            "Yes"
-                            if attention_required
-                            else "No"
-                        ),
-                    }
-                )
-
-            st.dataframe(
-                invoice_rows,
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        else:
-            st.caption(
-                "No invoices are associated with this matter yet."
-            )
-
-        st.divider()
-
-        # ====================================================================
-        # Budget adjustment
-        #
-        # Admin-only.
-        #
-        # Adjustment amount:
-        #   +10000 = increase budget by $10,000
-        #   -5000  = decrease budget by $5,000
-        #
-        # Backend validates:
-        #   - Amount cannot be zero
-        #   - Reason is mandatory
-        #   - Confirmation is mandatory
-        #   - Budget cannot become zero/negative
-        #   - Audit log is created
-        # ====================================================================
-
-        if user.get("role") == "admin":
-
-            st.markdown("#### Adjust budget")
-
-            with st.form(
-                f"adjust_budget_{budget_id}",
-                clear_on_submit=True,
-            ):
-
-                adjustment_amount = st.number_input(
-                    (
-                        "Adjustment amount "
-                        "(+ increase / - decrease)"
-                    ),
-                    value=0.0,
-                    step=1000.0,
-                    key=f"adjustment_amount_{budget_id}",
-                    help=(
-                        "Example: 25000 increases the budget by $25,000. "
-                        "-10000 decreases the budget by $10,000."
-                    ),
-                )
-
-                adjustment_reason = st.text_area(
-                    "Reason for adjustment (required)",
-                    key=f"adjustment_reason_{budget_id}",
-                    placeholder=(
-                        "Example: Additional litigation work approved."
-                    ),
-                )
-
-                adjustment_confirmed = st.checkbox(
-                    (
-                        "I confirm this budget adjustment and understand "
-                        "that it will be recorded in the audit log."
-                    ),
-                    key=f"adjustment_confirmed_{budget_id}",
-                )
-
-                submitted = st.form_submit_button(
-                    "Adjust budget",
-                    type="primary",
-                )
-
-                if submitted:
-
-                    try:
-
-                        client.adjust_budget(
-                            budget_id,
-                            adjustment_amount,
-                            adjustment_reason,
-                            adjustment_confirmed,
-                        )
-
-                        st.success(
-                            (
-                                "Budget adjusted successfully. "
-                                "The adjustment history and audit log "
-                                "have been updated."
-                            )
-                        )
-
-                        st.rerun()
-
-                    except APIError as e:
-
-                        st.error(
-                            f"Budget adjustment failed: {e.detail}"
-                        )
-
-        # ====================================================================
-        # Adjustment history
-        # ====================================================================
-
-        try:
-
-            adjustments = (
-                client.list_budget_adjustments(
-                    budget_id
-                )
-            )
-
-            if adjustments:
 
                 st.markdown(
-                    "#### Budget adjustment history"
+                    f"### {title}"
                 )
 
-                adjustment_rows = []
+                # ------------------------------------------------------------
+                # Budget metrics
+                # ------------------------------------------------------------
 
-                for adjustment in adjustments:
+                m1, m2, m3, m4 = st.columns(4)
 
-                    previous_amount = float(
-                        adjustment.get(
-                            "previous_amount"
-                        )
-                        or 0
+                m1.metric(
+                    "Effective budget",
+                    f"${matter['allocated']:,.2f}",
+                )
+
+                m2.metric(
+                    "Approved spend",
+                    f"${matter['utilized']:,.2f}",
+                )
+
+                m3.metric(
+                    "Remaining",
+                    f"${matter['remaining']:,.2f}",
+                )
+
+                m4.metric(
+                    "Utilization",
+                    f"{matter['pct_used']:.1f}%",
+                )
+
+                st.progress(
+                    min(
+                        matter["pct_used"] / 100,
+                        1.0,
+                    ),
+                    text=(
+                        f"Current utilization: "
+                        f"{matter['pct_used']:.1f}% · "
+                        f"Alert threshold: "
+                        f"{matter['threshold_pct']:.0f}%"
+                    ),
+                )
+
+                # ------------------------------------------------------------
+                # Budget state
+                # ------------------------------------------------------------
+
+                if matter["over_budget"]:
+                    notice(
+                        "OVER BUDGET — the approved spend is above "
+                        "the effective budget."
                     )
 
-                    adjustment_amount = float(
-                        adjustment.get(
-                            "adjustment_amount"
-                        )
-                        or 0
+                elif matter["threshold_reached"]:
+                    notice(
+                        "Budget threshold reached. This is a warning; "
+                        "it does not by itself block approval."
                     )
 
-                    new_amount = float(
-                        adjustment.get(
-                            "new_amount"
-                        )
-                        or 0
+                else:
+                    notice(
+                        "Within the configured budget threshold.",
+                        success=True,
                     )
 
-                    adjustment_rows.append(
+                # ------------------------------------------------------------
+                # Related invoices
+                # ------------------------------------------------------------
+
+                rows = []
+
+                for inv in matter["invoices"]:
+
+                    invoice_label = (
+                        inv.get("invoice_no")
+                        or f"#{inv['invoice_id']}"
+                    )
+
+                    if inv.get("is_newest_invoice"):
+                        invoice_label += " 🆕"
+
+                    rows.append(
                         {
-                            "Type": (
-                                adjustment.get(
-                                    "adjustment_type"
-                                )
-                                or "N/A"
+                            "Invoice No.": invoice_label,
+
+                            "Invoice Amount": (
+                                f"${inv['amount']:,.2f}"
                             ),
-                            "Previous Budget": (
-                                f"${previous_amount:,.2f}"
+
+                            "Invoice Status": (
+                                inv["status"]
+                                .replace("_", " ")
+                                .title()
                             ),
-                            "Adjustment": (
-                                f"${adjustment_amount:+,.2f}"
+
+                            "Budget Result": (
+                                inv["budget_result"]
+                                .replace("_", " ")
+                                .title()
                             ),
-                            "New Budget": (
-                                f"${new_amount:,.2f}"
+
+                            "Remaining After Invoice": (
+                                f"${inv['remaining_after_invoice']:,.2f}"
                             ),
-                            "Reason": (
-                                adjustment.get(
-                                    "reason"
-                                )
-                                or "N/A"
+
+                            "Projected Utilization": (
+                                f"{inv.get('projected_utilization', 0):.1f}%"
+                                if inv.get(
+                                    "projected_utilization"
+                                ) is not None
+                                else "—"
                             ),
-                            "Confirmed": (
+
+                            "Needs Attention": (
                                 "Yes"
-                                if adjustment.get(
-                                    "confirmed"
-                                )
+                                if inv["needs_attention"]
                                 else "No"
                             ),
-                            "Related Invoice ID": (
-                                adjustment.get(
-                                    "invoice_id"
-                                )
-                                or "N/A"
+
+                            "Review Reason": (
+                                inv.get("validation_message")
+                                or "—"
                             ),
-                            "Created At": (
-                                adjustment.get(
-                                    "created_at"
-                                )
-                                or "N/A"
+
+                            "_attention": (
+                                inv["needs_attention"]
                             ),
                         }
                     )
 
-                st.dataframe(
-                    adjustment_rows,
-                    use_container_width=True,
-                    hide_index=True,
+                st.markdown(
+                    "#### Related Invoices"
                 )
 
-            else:
+                if rows:
+                    df = pd.DataFrame(rows)
 
-                st.caption(
-                    "No budget adjustments have been made yet."
-                )
+                    display = df.drop(
+                        columns=["_attention"]
+                    )
 
-        except APIError:
+                    def highlight_attention(row):
+                        return [
+                            (
+                                "background-color: #ffe4e6; "
+                                "font-weight: 600"
+                            )
+                            if rows[row.name][
+                                "_attention"
+                            ]
+                            else ""
+                            for _ in row
+                        ]
 
-            # Do not break the complete budget page if adjustment
-            # history cannot be loaded for one matter.
-            st.caption(
-                "Adjustment history is currently unavailable."
-            )
+                    st.dataframe(
+                        display.style.apply(
+                            highlight_attention,
+                            axis=1,
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                    st.caption(
+                        "Rows highlighted in red require budget attention."
+                    )
+
+                else:
+                    st.caption(
+                        "No invoices are associated with this matter yet."
+                    )
+
+                # ------------------------------------------------------------
+                # Adjust budget
+                # ------------------------------------------------------------
+
+                if user["role"] == "admin":
+
+                    st.markdown(
+                        "#### Adjust Budget"
+                    )
+
+                    attention_invoices = [
+                        inv
+                        for inv in matter["invoices"]
+                        if (
+                            inv["status"] == "pending_review"
+                            and inv["needs_attention"]
+                        )
+                    ]
+
+                    options = {
+                        "No specific invoice": None
+                    }
+
+                    for inv in attention_invoices:
+
+                        invoice_label = (
+                            inv.get("invoice_no")
+                            or f"#{inv['invoice_id']}"
+                        )
+
+                        options[
+                            invoice_label
+                        ] = inv["invoice_id"]
+
+                    with st.form(
+                        f"adjust_{matter['budget_id']}"
+                    ):
+
+                        related_label = st.selectbox(
+                            "Related invoice",
+                            list(options.keys()),
+                            key=(
+                                f"rel_{matter['budget_id']}"
+                            ),
+                        )
+
+                        amount = st.number_input(
+                            (
+                                "Adjustment amount "
+                                "(+ increase / - decrease)"
+                            ),
+                            value=0.0,
+                            step=1000.0,
+                            key=(
+                                f"amount_{matter['budget_id']}"
+                            ),
+                        )
+
+                        reason = st.text_area(
+                            "Reason for adjustment (required)",
+                            placeholder=(
+                                "Example: Additional litigation work "
+                                "approved."
+                            ),
+                            key=(
+                                f"reason_{matter['budget_id']}"
+                            ),
+                        )
+
+                        confirmed = st.checkbox(
+                            (
+                                "I confirm this adjustment will be "
+                                "recorded in the audit log."
+                            ),
+                            key=(
+                                f"confirm_{matter['budget_id']}"
+                            ),
+                        )
+
+                        submitted = st.form_submit_button(
+                            "Adjust budget",
+                            type="primary",
+                        )
+
+                    if submitted:
+
+                        if amount == 0:
+                            st.error(
+                                "Adjustment amount cannot be zero."
+                            )
+
+                        elif not reason.strip():
+                            st.error(
+                                "A reason is required."
+                            )
+
+                        elif not confirmed:
+                            st.error(
+                                "Please confirm the adjustment."
+                            )
+
+                        else:
+
+                            try:
+                                result = client.adjust_budget(
+                                    matter["budget_id"],
+                                    amount,
+                                    reason,
+                                    confirmed,
+                                    options[related_label],
+                                )
+
+                                reconciliation = result.get(
+                                    "reconciliation",
+                                    {},
+                                )
+
+                                approved = reconciliation.get(
+                                    "auto_approved",
+                                    [],
+                                )
+
+                                pending = reconciliation.get(
+                                    "still_pending",
+                                    [],
+                                )
+
+                                flash(
+                                    result.get(
+                                        "message",
+                                        "Budget updated.",
+                                    ),
+                                    "success",
+                                )
+
+                                if approved:
+                                    flash(
+                                        (
+                                            "Auto-approved after budget "
+                                            "reconciliation: "
+                                            + ", ".join(
+                                                x.get("invoice_no")
+                                                or (
+                                                    f"#{x['invoice_id']}"
+                                                )
+                                                for x in approved
+                                            )
+                                        ),
+                                        "success",
+                                    )
+
+                                if pending:
+                                    flash(
+                                        (
+                                            f"{len(pending)} invoice(s) "
+                                            "still require review."
+                                        ),
+                                        "warning",
+                                    )
+
+                                st.rerun()
+
+                            except APIError as exc:
+                                flash(
+                                    exc.detail,
+                                    "warning",
+                                )
+                                st.rerun()
+
+                st.divider()

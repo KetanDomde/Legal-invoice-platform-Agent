@@ -175,7 +175,7 @@ def persist_extracted_invoice(
         db.rollback()
         org_inv = find_duplicate_invoice(
             db,
-            firm_id=firm_id,
+            matter_id=matter_id,
             invoice_no=parsed.invoice_no,
             total_amount=float(parsed.total_amount or 0),
         )

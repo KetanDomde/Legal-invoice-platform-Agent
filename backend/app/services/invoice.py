@@ -99,16 +99,18 @@ def get_budget_summary(db: Session, matter_id: int) -> dict:
 def find_duplicate_invoice(
     db: Session,
     *,
-    firm_id: int,
-    invoice_no: str,
+    matter_id: int,
+    invoice_no: str | None,
     total_amount: float,
     exclude_invoice_id: int | None = None,
 ) -> Invoice | None:
+    # Business duplicate key: same matter + same invoice number. Different
+    # matters may legitimately reuse invoice numbering.
+    if not invoice_no:
+        return None
     query = db.query(Invoice).filter(
-        Invoice.firm_id == firm_id,
+        Invoice.matter_id == matter_id,
         Invoice.invoice_no == invoice_no,
-        # removing amount for finding duplicate
-        # Invoice.total_amount == total_amount, 
     )
     if exclude_invoice_id is not None:
         query = query.filter(Invoice.invoice_id != exclude_invoice_id)
@@ -160,7 +162,7 @@ def validate_invoice(
     if duplicate_flag is None:
         duplicate = find_duplicate_invoice(
             db,
-            firm_id=invoice.firm_id,
+            matter_id=invoice.matter_id,
             invoice_no=invoice.invoice_no,
             total_amount=float(invoice.total_amount),
             exclude_invoice_id=invoice.invoice_id,
@@ -521,16 +523,33 @@ def request_clarification(db: Session, invoice: Invoice, user_id: int, reason: s
 
 
 def get_review_reasons(invoice: Invoice) -> list[str]:
+    """Return actionable reasons an administrator can resolve.
+
+    Prefer the server-generated validation message because it preserves the
+    exact failing rules instead of reducing every case to a generic label.
+    """
     reasons: list[str] = []
-    if invoice.confidence_score is not None and invoice.confidence_score < CONFIDENCE_THRESHOLD:
-        reasons.append("Extraction confidence is below threshold.")
-    if invoice.budget_valid is False:
-        reasons.append("Invoice failed budget validation.")
-    if invoice.duplicate_flag:
+    if invoice.validation_message:
+        reasons.extend(
+            [part.strip() for part in invoice.validation_message.split(";") if part.strip()]
+        )
+
+    if invoice.budget_valid is False and not any("budget" in r.lower() for r in reasons):
+        reasons.append("Invoice amount exceeds the remaining budget.")
+    if invoice.duplicate_flag and not any("duplicate" in r.lower() for r in reasons):
         reasons.append("Possible duplicate invoice detected.")
-    if not reasons:
-        reasons.append("Invoice requires manual review.")
-    return reasons
+    if (
+        invoice.confidence_score is not None
+        and invoice.confidence_score < CONFIDENCE_THRESHOLD
+        and not any("confidence" in r.lower() for r in reasons)
+    ):
+        reasons.append(
+            f"Extraction confidence {invoice.confidence_score:.2f} is below the required {CONFIDENCE_THRESHOLD:.2f}."
+        )
+
+    # De-duplicate while preserving order.
+    reasons = list(dict.fromkeys(reasons))
+    return reasons or ["Invoice requires manual review."]
 
 
 def get_review_queue(db: Session, firm_id: int) -> list[dict]:

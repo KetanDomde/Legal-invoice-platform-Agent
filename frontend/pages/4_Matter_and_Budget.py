@@ -1,3 +1,4 @@
+import pandas as pd
 import streamlit as st
 
 from utils.theme import (
@@ -7,19 +8,18 @@ from utils.theme import (
     notice,
     page_header,
     sidebar_brand,
-    status_badge,
 )
 from utils.api_client import (
+    APIError,
     get_client,
     require_login,
-    APIError,
 )
 from utils.invoice_picker import pick_invoice
+from utils.alert_cards import render_alert_cards
+from utils.notifications import (
+    show_flash_messages,
+)
 
-
-# ============================================================================
-# Page setup
-# ============================================================================
 
 st.set_page_config(
     page_title="Matter & Budget Context | Konverge",
@@ -31,12 +31,9 @@ inject_base_css()
 sidebar_brand()
 require_login()
 
+show_flash_messages()
+
 client = get_client()
-
-
-# ============================================================================
-# Select invoice
-# ============================================================================
 
 invoice = pick_invoice(
     label="Open Invoice"
@@ -46,791 +43,609 @@ if not invoice:
     st.stop()
 
 
-# ============================================================================
-# Load one complete invoice-level budget context from the backend.
-#
-# IMPORTANT:
-# This page intentionally uses one backend endpoint instead of independently
-# loading firms, matters, budgets, summaries, ledger entries and alerts.
-#
-# This prevents the frontend from duplicating budget calculations.
-# ============================================================================
-
 try:
-    context = client.get_invoice_budget_context(
-        invoice["invoice_id"]
+    hierarchy = (
+        client.get_budget_hierarchy()
+        or []
     )
 
-except APIError as e:
+    alerts = (
+        client.list_alerts(
+            active_only=True
+        )
+        or []
+    )
+
+except APIError as exc:
     st.error(
-        f"Couldn't load invoice budget context: {e.detail}"
+        f"Couldn't load matter and budget data: "
+        f"{exc.detail}"
     )
     st.stop()
 
 
-invoice_data = context["invoice"]
-firm = context["firm"]
-matter = context["matter"]
-budget = context["budget"]
-
-intake_snapshot = context.get(
-    "intake_snapshot",
-    {}
-)
-
-related_invoices = context.get(
-    "related_invoices",
-    []
-)
-
-budget_activity = context.get(
-    "budget_activity",
-    []
-)
-
-alerts = context.get(
-    "alerts",
-    [])
+selected_firm = None
+selected_matter = None
 
 
-# ============================================================================
-# Helper functions
-# ============================================================================
+for firm in hierarchy:
 
-def money(value):
-    """
-    Format money consistently across this page.
-    """
+    for matter in firm["matters"]:
 
-    if value is None:
-        return "—"
+        if (
+            matter["matter_id"]
+            == invoice["matter_id"]
+        ):
+            selected_firm = firm
+            selected_matter = matter
+            break
 
-    return f"${float(value):,.2f}"
-
-
-def format_status(value):
-    """
-    Convert backend values such as:
-        threshold_reached
-        over_budget
-
-    into:
-        Threshold Reached
-        Over Budget
-    """
-
-    if not value:
-        return "—"
-
-    return str(value).replace(
-        "_",
-        " "
-    ).title()
+    if selected_matter:
+        break
 
 
-def budget_status_badge(status_value):
-    """
-    Return a clean badge for budget status.
-    """
-
-    if status_value == "over_budget":
-        return badge(
-            "Over Budget",
-            "red",
-        )
-
-    if status_value == "threshold_reached":
-        return badge(
-            "Threshold Reached",
-            "orange",
-        )
-
-    if status_value == "within_budget":
-        return badge(
-            "Within Budget",
-            "green",
-        )
-
-    if status_value == "no_budget":
-        return badge(
-            "No Budget",
-            "gray",
-        )
-
-    return badge(
-        format_status(status_value),
-        "gray",
+if not selected_matter:
+    st.error(
+        "No budget context was found for this invoice's matter."
     )
+    st.stop()
 
 
-# ============================================================================
-# Page header
-# ============================================================================
+current_row = next(
+    (
+        row
+        for row in selected_matter["invoices"]
+        if row["invoice_id"]
+        == invoice["invoice_id"]
+    ),
+    None,
+)
+
 
 page_header(
     4,
     "Matter & Budget Context",
     (
-        "Invoice-level budget impact, firm and matter context, "
-        "related invoices, and budget activity."
+        "Matter, firm, invoice impact, current budget position, "
+        "and actionable alerts in one place."
     ),
-    extra_badge=budget_status_badge(
-        budget.get("projected_status")
-        or intake_snapshot.get("status")
+    extra_badge=badge(
+        (
+            "Attention Required"
+            if (
+                current_row
+                and current_row["needs_attention"]
+            )
+            else "Budget Checked"
+        ),
+        (
+            "orange"
+            if (
+                current_row
+                and current_row["needs_attention"]
+            )
+            else "green"
+        ),
     ),
 )
 
 
+left, right = st.columns([3.1, 1])
+
+
 # ============================================================================
-# Top section
-#
-# Left  -> current invoice
-# Right -> projected budget impact
+# ALERTS
 # ============================================================================
-
-left, right = st.columns(
-    [1.25, 1]
-)
-
-
-with left:
-    with st.container(border=True):
-
-        st.markdown(
-            "#### Current Invoice"
-        )
-
-        kv_row(
-            "Invoice No.",
-            invoice_data.get("invoice_no")
-            or f"#{invoice_data['invoice_id']}",
-        )
-
-        kv_row(
-            "Invoice Amount",
-            money(
-                invoice_data.get(
-                    "total_amount"
-                )
-            ),
-        )
-
-        kv_row(
-            "Invoice Date",
-            invoice_data.get(
-                "invoice_date"
-            )
-            or "—",
-        )
-
-        billing_start = invoice_data.get(
-            "billing_period_start"
-        )
-
-        billing_end = invoice_data.get(
-            "billing_period_end"
-        )
-
-        if billing_start or billing_end:
-            kv_row(
-                "Billing Period",
-                (
-                    f"{billing_start or '—'} "
-                    f"to {billing_end or '—'}"
-                ),
-            )
-
-        kv_row(
-            "Current Status",
-            status_badge(
-                invoice_data.get(
-                    "status",
-                    "submitted",
-                )
-            ),
-        )
-
-        kv_row(
-            "Invoice ID",
-            f"#{invoice_data['invoice_id']}",
-        )
-
 
 with right:
+
     with st.container(border=True):
 
-        st.markdown(
-            "#### Budget Impact"
+        st.markdown("#### 🔔 Alerts")
+
+        matter_alerts = [
+            alert
+            for alert in alerts
+            if (
+                alert["budget_id"]
+                == selected_matter["budget_id"]
+            )
+        ]
+
+        dismissed = render_alert_cards(
+            client,
+            matter_alerts,
+            key_prefix=(
+                f"matter_{selected_matter['budget_id']}"
+            ),
+            empty_message=(
+                "No active alerts for this matter."
+            ),
+            compact=True,
         )
 
-        if budget.get("has_budget"):
+        if dismissed:
+            st.rerun()
 
-            projected_pct = float(
-                budget.get(
-                    "projected_pct_used",
-                    0,
+
+# ============================================================================
+# FIRM / MATTER / BUDGET
+# ============================================================================
+
+with left:
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+
+        with st.container(border=True):
+
+            st.markdown("#### Firm")
+
+            kv_row(
+                "Firm Name",
+                selected_firm["firm_name"],
+            )
+
+            kv_row(
+                "Address",
+                selected_firm.get(
+                    "firm_address"
                 )
+                or "—",
             )
 
-            st.progress(
-                min(
-                    max(
-                        projected_pct / 100,
-                        0,
-                    ),
-                    1.0,
-                ),
-                text=(
-                    f"Projected utilization: "
-                    f"{projected_pct:.1f}%"
-                ),
-            )
+    with c2:
+
+        with st.container(border=True):
+
+            st.markdown("#### Matter")
 
             kv_row(
-                "Effective Budget",
-                money(
-                    budget.get(
-                        "allocated"
-                    )
-                ),
-            )
-
-            kv_row(
-                "Already Used",
-                money(
-                    budget.get(
-                        "utilized"
-                    )
-                ),
-            )
-
-            kv_row(
-                "Remaining Before Invoice",
-                money(
-                    budget.get(
-                        "remaining"
-                    )
-                ),
-            )
-
-            kv_row(
-                "Current Invoice",
-                money(
-                    budget.get(
-                        "invoice_amount"
-                    )
-                ),
-            )
-
-            kv_row(
-                "Projected Remaining",
-                money(
-                    budget.get(
-                        "projected_remaining"
-                    )
-                ),
-            )
-
-            kv_row(
-                "Alert Threshold",
+                "Matter ID",
                 (
-                    f"{float(budget.get('threshold_pct', 0)):.0f}%"
+                    selected_matter.get(
+                        "matter_no"
+                    )
+                    or str(
+                        selected_matter[
+                            "matter_id"
+                        ]
+                    )
+                ),
+            )
+
+            kv_row(
+                "Matter Name",
+                selected_matter[
+                    "matter_name"
+                ],
+            )
+
+    st.markdown("## Budget Decision")
+
+    if current_row:
+
+        d1, d2, d3, d4 = st.columns(4)
+
+        d1.metric(
+            "Invoice Amount",
+            f"${current_row['amount']:,.2f}",
+        )
+
+        d2.metric(
+            "Effective Budget",
+            f"${selected_matter['allocated']:,.2f}",
+        )
+
+        d3.metric(
+            "Projected Remaining",
+            (
+                f"${current_row['remaining_after_invoice']:,.2f}"
+            ),
+        )
+
+        projected_utilization = (
+            current_row.get(
+                "projected_utilization"
+            )
+        )
+
+        if projected_utilization is not None:
+
+            d4.metric(
+                "Projected Utilization",
+                (
+                    f"{float(projected_utilization):.1f}%"
                 ),
             )
 
         else:
 
-            st.warning(
-                "No budget is available for this matter."
+            invoice_amount = float(
+                current_row.get("amount")
+                or 0
             )
 
-
-# ============================================================================
-# Firm and matter identity
-#
-# Matter No. is intentionally displayed separately from the matter name.
-# The business identifier is important because:
-#
-# Same Firm + Same Matter ID = Same Matter
-# ============================================================================
-
-st.markdown(
-    "### Firm & Matter Context"
-)
-
-context_left, context_right = st.columns(
-    2
-)
-
-
-with context_left:
-    with st.container(border=True):
-
-        st.markdown(
-            "#### Firm"
-        )
-
-        kv_row(
-            "Firm Name",
-            firm.get("name")
-            or "—",
-        )
-
-        kv_row(
-            "Firm ID",
-            firm.get("firm_id")
-            or "—",
-        )
-
-        kv_row(
-            "Address",
-            firm.get("address")
-            or "—",
-        )
-
-
-with context_right:
-    with st.container(border=True):
-
-        st.markdown(
-            "#### Matter"
-        )
-
-        kv_row(
-            "Matter ID",
-            matter.get("matter_no")
-            or "—",
-        )
-
-        kv_row(
-            "Matter Name",
-            matter.get("name")
-            or "—",
-        )
-
-        kv_row(
-            "Internal Matter Record",
-            f"#{matter['matter_id']}",
-        )
-
-        kv_row(
-            "Owner",
-            matter.get("owner")
-            or "Unassigned",
-        )
-
-        kv_row(
-            "Matter Status",
-            format_status(
-                matter.get("status")
-            ),
-        )
-
-
-# ============================================================================
-# Budget decision
-#
-# The current invoice may not yet be approved.
-#
-# Therefore:
-#   Actual budget = approved ledger entries
-#   Projected budget = actual budget + current invoice
-#
-# If the invoice is already posted, the backend prevents double counting.
-# ============================================================================
-
-st.markdown(
-    "### Budget Decision"
-)
-
-projected_status = budget.get(
-    "projected_status"
-)
-
-if not budget.get("has_budget"):
-
-    st.error(
-        (
-            "NO BUDGET — This invoice cannot be approved until "
-            "a valid budget is available for this matter."
-        )
-    )
-
-elif projected_status == "over_budget":
-
-    over_by = abs(
-        float(
-            budget.get(
-                "projected_remaining",
-                0,
+            effective_budget = float(
+                selected_matter.get(
+                    "allocated"
+                )
+                or 0
             )
+
+            approved_spend = float(
+                selected_matter.get(
+                    "utilized"
+                )
+                or 0
+            )
+
+            if effective_budget > 0:
+
+                calculated_utilization = (
+                    (
+                        approved_spend
+                        + invoice_amount
+                    )
+                    / effective_budget
+                ) * 100
+
+                d4.metric(
+                    "Projected Utilization",
+                    (
+                        f"{calculated_utilization:.1f}%"
+                    ),
+                )
+
+            else:
+
+                d4.metric(
+                    "Projected Utilization",
+                    "—",
+                )
+
+        result = current_row[
+            "budget_result"
+        ]
+
+        if result == "over_budget":
+
+            notice(
+                (
+                    "OVER BUDGET — this invoice cannot clear "
+                    "the budget gate until the budget is adjusted "
+                    "or an authorized override is used."
+                )
+            )
+
+        elif result == "threshold_reached":
+
+            notice(
+                (
+                    "BUDGET THRESHOLD REACHED — warning only. "
+                    "The invoice may still be approved if all "
+                    "other validation checks pass."
+                )
+            )
+
+        else:
+
+            notice(
+                (
+                    "WITHIN BUDGET — no budget blocker "
+                    "is present."
+                ),
+                success=True,
+            )
+
+        if current_row.get(
+            "validation_message"
+        ):
+
+            st.markdown(
+                "#### Why This Invoice Is Pending / What To Resolve"
+            )
+
+            for reason in [
+                value.strip()
+                for value in current_row[
+                    "validation_message"
+                ].split(";")
+                if value.strip()
+            ]:
+
+                st.warning(reason)
+
+        if current_row.get(
+            "intake_budget_result"
+        ):
+
+            st.caption(
+                (
+                    "Historical intake snapshot: "
+                    + current_row[
+                        "intake_budget_result"
+                    ]
+                    .replace("_", " ")
+                    .title()
+                )
+                + (
+                    (
+                        f" · remaining after intake "
+                        f"${current_row['intake_remaining_after_invoice']:,.2f}"
+                    )
+                    if current_row.get(
+                        "intake_remaining_after_invoice"
+                    )
+                    is not None
+                    else ""
+                )
+            )
+
+    else:
+
+        st.warning(
+            "The selected invoice could not be found in the budget hierarchy."
         )
-    )
-
-    st.error(
-        (
-            "OVER BUDGET — If this invoice proceeds without a budget "
-            f"adjustment, the matter will exceed its budget by "
-            f"{money(over_by)}."
-        )
-    )
-
-    st.caption(
-        (
-            "Review the invoice and budget in Budgets & Alerts. "
-            "An Admin can adjust the budget with a mandatory reason "
-            "and confirmation."
-        )
-    )
-
-    if st.button(
-        "Go to Budgets & Alerts →",
-        type="primary",
-    ):
-        st.switch_page(
-            "pages/8_Budgets_and_Alerts.py"
-        )
-
-elif projected_status == "threshold_reached":
-
-    st.warning(
-        (
-            "BUDGET THRESHOLD REACHED — This invoice does not exceed "
-            "the total budget, but it reaches or crosses the configured "
-            f"{float(budget.get('threshold_pct', 0)):.0f}% threshold."
-        )
-    )
-
-    st.caption(
-        (
-            "Budget attention is recommended before the invoice "
-            "continues through the workflow."
-        )
-    )
-
-elif budget.get("already_posted"):
-
-    st.success(
-        (
-            "This invoice has already been posted to the approved "
-            "budget ledger. The figures above show the current actual "
-            "budget position without counting this invoice twice."
-        )
-    )
-
-else:
-
-    st.success(
-        (
-            "WITHIN BUDGET — The projected impact of this invoice "
-            "remains below the configured alert threshold."
-        )
-    )
 
 
-# ============================================================================
-# Intake snapshot
-#
-# This preserves the budget position that existed when the invoice first
-# entered the system.
-#
-# It is intentionally separate from the current budget because the budget
-# may have been adjusted later.
-# ============================================================================
-
-if intake_snapshot:
+    # ========================================================================
+    # RELATED INVOICES
+    # ========================================================================
 
     st.markdown(
-        "### Budget Position at Intake"
+        "## Related Invoices for This Matter"
     )
 
-    snapshot_left, snapshot_right = st.columns(
-        2
-    )
+    rows = []
 
-    with snapshot_left:
-        with st.container(border=True):
+    for row in selected_matter["invoices"]:
 
-            kv_row(
-                "Budget at Intake",
-                money(
-                    intake_snapshot.get(
-                        "budget_amount"
-                    )
-                ),
-            )
+        invoice_label = (
+            row.get("invoice_no")
+            or f"#{row['invoice_id']}"
+        )
 
-            kv_row(
-                "Used Before Invoice",
-                money(
-                    intake_snapshot.get(
-                        "used_before_invoice"
-                    )
-                ),
-            )
+        if row.get(
+            "is_newest_invoice"
+        ):
+            invoice_label += " 🆕"
 
-            kv_row(
-                "Projected After Invoice",
-                money(
-                    intake_snapshot.get(
-                        "projected_after_invoice"
-                    )
-                ),
-            )
-
-    with snapshot_right:
-        with st.container(border=True):
-
-            kv_row(
-                "Remaining After Invoice",
-                money(
-                    intake_snapshot.get(
-                        "remaining_after_invoice"
-                    )
-                ),
-            )
-
-            projected_pct = intake_snapshot.get(
-                "projected_pct"
-            )
-
-            kv_row(
-                "Projected Utilization",
-                (
-                    f"{float(projected_pct):.1f}%"
-                    if projected_pct is not None
-                    else "—"
-                ),
-            )
-
-            kv_row(
-                "Initial Budget Result",
-                budget_status_badge(
-                    intake_snapshot.get(
-                        "status"
-                    )
-                ),
-            )
-
-            kv_row(
-                "Attention Required",
-                (
-                    "Yes"
-                    if intake_snapshot.get(
-                        "attention_required"
-                    )
-                    else "No"
-                ),
-            )
-
-
-# ============================================================================
-# Related invoices
-#
-# All invoices belonging to the same Firm + Matter ID budget are shown here.
-# ============================================================================
-
-st.markdown(
-    "### Related Invoices for This Matter"
-)
-
-st.caption(
-    (
-        f"Firm: {firm.get('name', '—')}  |  "
-        f"Matter: {matter.get('matter_no', '—')} - "
-        f"{matter.get('name', '—')}"
-    )
-)
-
-if related_invoices:
-
-    invoice_rows = []
-
-    for related in related_invoices:
-
-        invoice_rows.append(
+        rows.append(
             {
-                "Invoice No.": (
-                    related.get("invoice_no")
-                    or f"#{related['invoice_id']}"
+                "Invoice No.": invoice_label,
+
+                "Amount": (
+                    f"${row['amount']:,.2f}"
                 ),
-                "Amount": money(
-                    related.get(
-                        "total_amount"
-                    )
+
+                "Status": (
+                    row["status"]
+                    .replace("_", " ")
+                    .title()
                 ),
-                "Status": format_status(
-                    related.get(
-                        "status"
-                    )
+
+                "Budget Result": (
+                    row["budget_result"]
+                    .replace("_", " ")
+                    .title()
                 ),
-                "Intake Budget Result": format_status(
-                    related.get(
-                        "budget_status_at_intake"
-                    )
+
+                "Remaining After Invoice": (
+                    f"${row['remaining_after_invoice']:,.2f}"
                 ),
-                "Remaining After Intake": money(
-                    related.get(
-                        "budget_remaining_after_invoice"
-                    )
-                ),
+
                 "Needs Attention": (
                     "Yes"
-                    if related.get(
-                        "budget_attention_required"
-                    )
+                    if row["needs_attention"]
                     else "No"
                 ),
+
                 "Current Invoice": (
                     "Yes"
-                    if related.get(
-                        "is_current"
+                    if (
+                        row["invoice_id"]
+                        == invoice["invoice_id"]
                     )
                     else ""
                 ),
+
+                "_attention": (
+                    row["needs_attention"]
+                ),
             }
         )
 
-    st.dataframe(
-        invoice_rows,
-        use_container_width=True,
-        hide_index=True,
-    )
 
-else:
+    if rows:
 
-    st.caption(
-        "No related invoices were found."
-    )
+        df = pd.DataFrame(rows)
 
+        display = df.drop(
+            columns=["_attention"]
+        )
 
-# ============================================================================
-# Budget activity
-#
-# This replaces the old technical "Budget Ledger Evidence" presentation.
-#
-# The user sees business-friendly events:
-#   - Invoice approved
-#   - Budget increased
-#   - Budget decreased
-# ============================================================================
+        def highlight(row):
+            attention = rows[
+                row.name
+            ]["_attention"]
 
-st.markdown(
-    "### Budget Activity"
-)
-
-if budget_activity:
-
-    activity_rows = []
-
-    for activity in budget_activity:
-
-        activity_rows.append(
-            {
-                "Date": activity.get(
-                    "created_at"
+            return [
+                (
+                    "background-color: #ffe4e6; "
+                    "font-weight: 600"
                 )
-                or "—",
-                "Activity": format_status(
-                    activity.get(
-                        "activity_type"
-                    )
+                if attention
+                else ""
+                for _ in row
+            ]
+
+        st.dataframe(
+            display.style.apply(
+                highlight,
+                axis=1,
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    else:
+
+        st.caption(
+            "No related invoices were found."
+        )
+
+
+    # ========================================================================
+    # BUDGET ACTIVITY
+    # ========================================================================
+
+    st.markdown("## Budget Activity")
+
+    try:
+
+        adjustments = (
+            client.list_budget_adjustments(
+                selected_matter["budget_id"]
+            )
+            or []
+        )
+
+        ledger = (
+            client.list_budget_ledger(
+                budget_id=selected_matter[
+                    "budget_id"
+                ]
+            )
+            or []
+        )
+
+    except APIError as exc:
+
+        adjustments = []
+        ledger = []
+
+        st.warning(
+            f"Couldn't load budget activity: "
+            f"{exc.detail}"
+        )
+
+
+    invoice_names = {
+        row["invoice_id"]: (
+            row.get("invoice_no")
+            or f"#{row['invoice_id']}"
+        )
+        for row in selected_matter[
+            "invoices"
+        ]
+    }
+
+
+    activity = []
+
+
+    for item in adjustments:
+
+        activity.append(
+            {
+                "created_at": item[
+                    "created_at"
+                ],
+
+                "Activity": (
+                    f"Budget "
+                    f"{item['adjustment_type'].title()}"
                 ),
+
                 "Invoice": (
-                    activity.get(
-                        "invoice_no"
-                    )
+                    item.get("invoice_no")
                     or "—"
                 ),
-                "Amount / Change": money(
-                    activity.get(
-                        "amount"
-                    )
+
+                "Amount / Change": (
+                    f"${item['adjustment_amount']:+,.2f}"
                 ),
-                "Budget After": money(
-                    activity.get(
-                        "budget_after"
-                    )
+
+                "Budget After": (
+                    f"${item['new_amount']:,.2f}"
                 ),
-                "Reason": (
-                    activity.get(
-                        "reason"
-                    )
-                    or "—"
-                ),
+
+                "Reason": item["reason"],
+
                 "Confirmed": (
                     "Yes"
-                    if activity.get(
-                        "confirmed"
-                    ) is True
-                    else (
-                        "No"
-                        if activity.get(
-                            "confirmed"
-                        ) is False
-                        else "—"
-                    )
+                    if item["confirmed"]
+                    else "No"
                 ),
             }
         )
 
-    st.dataframe(
-        activity_rows,
-        use_container_width=True,
-        hide_index=True,
-    )
 
-else:
+    for item in ledger:
 
-    st.caption(
-        "No approved invoice or budget adjustment activity yet."
-    )
+        activity.append(
+            {
+                "created_at": item[
+                    "created_at"
+                ],
 
+                "Activity": (
+                    "Invoice Approved"
+                ),
 
-# ============================================================================
-# Alerts
-# ============================================================================
+                "Invoice": (
+                    invoice_names.get(
+                        item["invoice_id"],
+                        f"#{item['invoice_id']}",
+                    )
+                ),
 
-if alerts:
+                "Amount / Change": (
+                    f"${item['amount']:,.2f}"
+                ),
 
-    st.markdown(
-        "### Budget Alerts"
-    )
+                "Budget After": "—",
 
-    for alert in alerts:
+                "Reason": "—",
 
-        message = alert.get(
-            "message"
-        ) or "Budget attention required."
-
-        if alert.get(
-            "is_active",
-            True,
-        ):
-            st.warning(
-                message
-            )
-        else:
-            st.info(
-                message
-            )
+                "Confirmed": "—",
+            }
+        )
 
 
-# ============================================================================
-# Continue workflow
-# ============================================================================
+    if activity:
 
-st.markdown("---")
+        activity.sort(
+            key=lambda value: str(
+                value["created_at"]
+            ),
+            reverse=True,
+        )
+
+        activity_df = (
+            pd.DataFrame(activity)
+            .drop(columns=["created_at"])
+        )
+
+        st.dataframe(
+            activity_df,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    else:
+
+        st.caption(
+            "No budget activity recorded yet."
+        )
+
 
 if st.button(
     "Continue to Validation & Duplicate Check →",
     type="primary",
 ):
-
-    st.session_state[
-        "selected_invoice_id"
-    ] = invoice_data["invoice_id"]
-
     st.switch_page(
         "pages/5_Validation_Check.py"
     )

@@ -133,6 +133,20 @@ class APIClient:
         return self._call("POST", "/budgets", json={
             "matter_id": matter_id, "allocated_amt": allocated_amt, "threshold_pct": threshold_pct})
 
+    def get_budget_hierarchy(self):
+        return self._call("GET", "/budgets/hierarchy")
+
+    def list_budget_adjustments(self, budget_id: int):
+        return self._call("GET", f"/budgets/{budget_id}/adjustments")
+
+    def adjust_budget(self, budget_id: int, adjustment_amount: float, reason: str, confirmed: bool, invoice_id: int | None = None):
+        return self._call("POST", f"/budgets/{budget_id}/adjustments", json={
+            "adjustment_amount": adjustment_amount,
+            "reason": reason,
+            "confirmed": confirmed,
+            "invoice_id": invoice_id,
+        })
+
     # --- invoices -------------------------------------------------------
     # Matter/firm are no longer supplied by the caller on submit — they're
     # resolved (and auto-created if needed) server-side from matter_no/
@@ -173,21 +187,6 @@ class APIClient:
     def get_invoice(self, invoice_id: int):
         return self._call("GET", f"/invoices/{invoice_id}")
 
-    def get_invoice_budget_context(
-    self,
-    invoice_id: int,
-):
-        """
-        Return complete budget context for one invoice.
-
-        The backend performs all budget calculations so the Streamlit page
-        does not independently calculate utilization or projected spend.
-        """
-        return self._call(
-            "GET",
-            f"/invoices/{invoice_id}/budget-context",
-        )
-
     def list_invoices(self, matter_id=None, firm_id=None):
         params = {}
         if matter_id is not None:
@@ -200,23 +199,24 @@ class APIClient:
     def list_line_items(self, invoice_id=None):
         return self._call("GET", "/line-items", params={"invoice_id": invoice_id})
 
-    # --- automatic budget management -----------------------------------------
-    def get_budget_hierarchy(self):
-        return self._call("GET", "/budgets/hierarchy")
-
-    def adjust_budget(self, budget_id: int, adjustment_amount: float, reason: str, confirmed: bool, invoice_id: int | None = None):
-        payload={"adjustment_amount": adjustment_amount, "reason": reason, "confirmed": confirmed, "invoice_id": invoice_id}
-        return self._call("POST", f"/budgets/{budget_id}/adjustments", json=payload)
-
-    def list_budget_adjustments(self, budget_id: int):
-        return self._call("GET", f"/budgets/{budget_id}/adjustments")
-
     # --- budget ledger / alerts ----------------------------------------------
     def list_budget_ledger(self, budget_id=None, invoice_id=None):
         return self._call("GET", "/budget-ledger", params={"budget_id": budget_id, "invoice_id": invoice_id})
 
-    def list_alerts(self, budget_id=None):
-        return self._call("GET", "/alerts", params={"budget_id": budget_id})
+    def list_alerts(self, budget_id=None, active_only=True):
+        params = {}
+
+        if budget_id is not None:
+            params["budget_id"] = budget_id
+
+        if active_only is not None:
+            params["active_only"] = active_only
+
+        return self._call(
+            "GET",
+            "/alerts",
+            params=params or None,
+        )
 
     # --- review workflow -----------------------------------------------------
     def review_queue(self):
@@ -269,6 +269,17 @@ class APIClient:
         if limit:
             params["limit"] = limit
         return self._call("GET", "/audit-logs/", params=params or None)
+    def dismiss_alert(self, alert_id: int):
+        """
+        Dismiss an alert without deleting its database record.
+
+        The backend sets is_active=False and records resolved_at.
+        """
+
+        return self._call(
+            "PATCH",
+            f"/alerts/{alert_id}/dismiss",
+        )
 
 
 def get_client() -> APIClient:

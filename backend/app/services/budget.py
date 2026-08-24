@@ -178,6 +178,14 @@ def _create_budget_alerts(
     before_pct = before_summary["pct_used"]
     after_pct = after_summary["pct_used"]
 
+    matter = db.get(Matter, matter_id)
+    invoice = db.get(Invoice, invoice_id)
+    firm_name = (matter.firm.name if matter is not None and getattr(matter, "firm", None) else f"Firm #{matter.firm_id}" if matter is not None else "Unknown Firm")
+    matter_label = (matter.matter_no or str(matter_id)) if matter is not None else str(matter_id)
+    matter_name = matter.name if matter is not None else "Unknown matter"
+    invoice_no = invoice.invoice_no if invoice is not None and invoice.invoice_no else f"#{invoice_id}"
+    alert_prefix = f"Firm: {firm_name} | Matter: {matter_label} — {matter_name} | Invoice: {invoice_no}."
+
     # Threshold crossing, for example 75% -> 85% with an 80% threshold.
     crossed_threshold = (
         before_pct < threshold <= after_pct
@@ -188,34 +196,54 @@ def _create_budget_alerts(
         crossed_threshold = True
 
     if crossed_threshold:
-        db.add(
-            Alert(
-                budget_id=budget_id,
-                type="budget_threshold",
-                message=(
-                    f"Matter {matter_id} reached {after_pct:.1f}% budget utilization "
-                    f"after invoice #{invoice_id}. "
-                    f"Configured threshold: {threshold:.1f}%."
-                ),
+        existing = (
+            db.query(Alert)
+            .filter(
+                Alert.budget_id == budget_id,
+                Alert.invoice_id == invoice_id,
+                Alert.type.in_(["budget_threshold", "BUDGET_THRESHOLD_REACHED"]),
             )
+            .first()
         )
+        if existing is None:
+            db.add(
+                Alert(
+                    budget_id=budget_id,
+                    invoice_id=invoice_id,
+                    type="budget_threshold",
+                    message=(
+                        f"{alert_prefix} Budget threshold reached at {after_pct:.1f}% utilization. "
+                        f"Configured threshold: {threshold:.1f}%."
+                    ),
+                )
+            )
 
     # A separate alert is created when an approved override pushes utilization
     # from within budget to above 100%.
     crossed_over_budget = before_pct <= 100 < after_pct
 
     if crossed_over_budget:
-        db.add(
-            Alert(
-                budget_id=budget_id,
-                type="budget_overrun",
-                message=(
-                    f"Matter {matter_id} is now over budget at {after_pct:.1f}% "
-                    f"utilization after invoice #{invoice_id}. "
-                    f"Remaining budget: ${after_summary['remaining']:,.2f}."
-                ),
+        existing = (
+            db.query(Alert)
+            .filter(
+                Alert.budget_id == budget_id,
+                Alert.invoice_id == invoice_id,
+                Alert.type.in_(["budget_overrun", "OVER_BUDGET_DETECTED"]),
             )
+            .first()
         )
+        if existing is None:
+            db.add(
+                Alert(
+                    budget_id=budget_id,
+                    invoice_id=invoice_id,
+                    type="budget_overrun",
+                    message=(
+                        f"{alert_prefix} Matter is over budget at {after_pct:.1f}% utilization. "
+                        f"Remaining budget: ${after_summary['remaining']:,.2f}."
+                    ),
+                )
+            )
 
 
 def post_approved_invoice_to_budget(

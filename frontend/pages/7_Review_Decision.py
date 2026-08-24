@@ -15,6 +15,7 @@ from utils.api_client import (
     APIError,
 )
 from utils.invoice_picker import pick_invoice
+from utils.notifications import flash
 
 
 st.set_page_config(
@@ -289,13 +290,9 @@ with right:
                     )
 
                     if over_budget:
-                        st.success(
-                            "Approved as a documented budget override."
-                        )
+                        flash("Invoice approved as a documented budget override.", "success")
                     else:
-                        st.success(
-                            "Approved."
-                        )
+                        flash("Invoice approved successfully.", "success")
 
                 elif action == "Reject":
                     client.reject(
@@ -303,9 +300,7 @@ with right:
                         reason=note_text,
                     )
 
-                    st.success(
-                        "Rejected."
-                    )
+                    flash("Invoice rejected.", "success")
 
                 else:
                     client.clarify(
@@ -313,9 +308,7 @@ with right:
                         reason=note_text,
                     )
 
-                    st.success(
-                        "Clarification requested."
-                    )
+                    flash("Clarification requested.", "success")
 
                 st.rerun()
 

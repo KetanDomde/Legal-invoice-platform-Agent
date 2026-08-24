@@ -67,7 +67,3 @@ with right:
                 st.error(e.detail)
 
         st.caption("Decision support only — this action is final once submitted and is recorded in the audit trail.")
-
-st.markdown("---")
-if st.button("← Back to Review Queue"):
-    st.switch_page("pages/6_Review_Queue.py")

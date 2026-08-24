@@ -110,9 +110,42 @@ class APIClient:
     def list_budgets(self):
         return self._call("GET", "/budgets")
 
+    def list_budget_summaries(self):
+        """
+        Canonical budget utilization for all accessible budgets.
+        """
+        return self._call(
+            "GET",
+            "/budgets/summary",
+        )
+
+
+    def get_budget_summary(self, budget_id: int):
+        """
+        Canonical utilization for one budget.
+        """
+        return self._call(
+            "GET",
+            f"/budgets/{budget_id}/summary",
+        )
+
     def create_budget(self, matter_id, allocated_amt, threshold_pct=80):
         return self._call("POST", "/budgets", json={
             "matter_id": matter_id, "allocated_amt": allocated_amt, "threshold_pct": threshold_pct})
+
+    def get_budget_hierarchy(self):
+        return self._call("GET", "/budgets/hierarchy")
+
+    def list_budget_adjustments(self, budget_id: int):
+        return self._call("GET", f"/budgets/{budget_id}/adjustments")
+
+    def adjust_budget(self, budget_id: int, adjustment_amount: float, reason: str, confirmed: bool, invoice_id: int | None = None):
+        return self._call("POST", f"/budgets/{budget_id}/adjustments", json={
+            "adjustment_amount": adjustment_amount,
+            "reason": reason,
+            "confirmed": confirmed,
+            "invoice_id": invoice_id,
+        })
 
     # --- invoices -------------------------------------------------------
     # Matter/firm are no longer supplied by the caller on submit — they're
@@ -170,8 +203,20 @@ class APIClient:
     def list_budget_ledger(self, budget_id=None, invoice_id=None):
         return self._call("GET", "/budget-ledger", params={"budget_id": budget_id, "invoice_id": invoice_id})
 
-    def list_alerts(self, budget_id=None):
-        return self._call("GET", "/alerts", params={"budget_id": budget_id})
+    def list_alerts(self, budget_id=None, active_only=True):
+        params = {}
+
+        if budget_id is not None:
+            params["budget_id"] = budget_id
+
+        if active_only is not None:
+            params["active_only"] = active_only
+
+        return self._call(
+            "GET",
+            "/alerts",
+            params=params or None,
+        )
 
     # --- review workflow -----------------------------------------------------
     def review_queue(self):
@@ -190,9 +235,31 @@ class APIClient:
         return self._call("POST", f"/review/{invoice_id}/clarify", params={"reason": reason})
 
     # --- validation ------------------------------------------------------------
-    def validate_invoice(self, invoice_id, budget_valid=None, duplicate_flag=False, confidence_score=None):
-        return self._call("POST", f"/validation/{invoice_id}", params={
-            "budget_valid": budget_valid, "duplicate_flag": duplicate_flag, "confidence_score": confidence_score})
+
+    def validate_invoice(
+        self,
+        invoice_id,
+        duplicate_flag=None,
+        confidence_score=None,
+    ):
+        """
+        Re-run validation.
+
+        Budget validity is never supplied by the frontend. The backend calculates
+        it from the canonical budget ledger.
+        """
+
+        return self._call(
+            "POST",
+            f"/validation/{invoice_id}",
+            params={
+                "duplicate_flag": duplicate_flag,
+                "confidence_score": confidence_score,
+            },
+        )
+    # def validate_invoice(self, invoice_id, budget_valid=None, duplicate_flag=False, confidence_score=None):
+    #     return self._call("POST", f"/validation/{invoice_id}", params={
+    #         "budget_valid": budget_valid, "duplicate_flag": duplicate_flag, "confidence_score": confidence_score})
 
     # --- audit logs ---------------------------------------------------------------
     def list_audit_logs(self, invoice_id=None, user_id=None, filter: str | None = None, limit: int | None= None):
@@ -202,6 +269,17 @@ class APIClient:
         if limit:
             params["limit"] = limit
         return self._call("GET", "/audit-logs/", params=params or None)
+    def dismiss_alert(self, alert_id: int):
+        """
+        Dismiss an alert without deleting its database record.
+
+        The backend sets is_active=False and records resolved_at.
+        """
+
+        return self._call(
+            "PATCH",
+            f"/alerts/{alert_id}/dismiss",
+        )
 
 
 def get_client() -> APIClient:

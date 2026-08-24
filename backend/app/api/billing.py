@@ -1,9 +1,12 @@
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.auth.security import ADMIN, EDITOR, get_current_user, require_role
 from app.database.database import get_db
-from app.models import Alert, Budget, BudgetLedger, Firm, Invoice, LineItem, Matter, User
+from app.models import Alert, Budget, BudgetAdjustment, BudgetLedger, Firm, Invoice, LineItem, Matter, User
 from app.schemas.billing import (
     AlertCreate,
     AlertRead,
@@ -12,6 +15,7 @@ from app.schemas.billing import (
     BudgetLedgerRead,
     BudgetRead,
     BudgetUpdate,
+    BudgetAdjustmentCreate,
     FirmCreate,
     FirmRead,
     FirmUpdate,
@@ -25,7 +29,11 @@ from app.schemas.billing import (
     MatterRead,
     MatterUpdate,
 )
-
+from app.services.budget import (
+    get_all_budget_summaries,
+    get_budget_summary,
+)
+from app.services.budget_management import budget_hierarchy, adjust_budget, reconcile_budget_after_adjustment
 
 router = APIRouter(tags=["Billing"])
 
@@ -238,6 +246,62 @@ def list_budgets(
     return query.order_by(Budget.budget_id.asc()).offset(offset).limit(limit).all()
 
 
+@router.get("/budgets/summary")
+def list_budget_summaries(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Return canonical budget utilization for every accessible matter.
+
+    Streamlit pages should use this endpoint instead of calculating
+    utilization independently from raw ledger rows.
+    """
+
+    return get_all_budget_summaries(
+        db=db,
+        firm_id=current_user.firm_id,
+    )
+
+
+@router.get("/budgets/hierarchy")
+def get_budget_hierarchy(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Firm -> Matter -> Budget -> Invoice hierarchy for all budget UI."""
+    return budget_hierarchy(db, firm_id=current_user.firm_id)
+
+
+@router.get("/budgets/{budget_id}/summary")
+def get_single_budget_summary(
+    budget_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Return the canonical utilization summary for one budget.
+    """
+
+    budget = db.get(Budget, budget_id)
+
+    if budget is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Budget not found",
+        )
+
+    _ensure_firm_access(
+        current_user,
+        budget.matter.firm_id,
+    )
+
+    return get_budget_summary(
+        db=db,
+        matter_id=budget.matter_id,
+    )
+
+
 @router.get("/budgets/{budget_id}", response_model=BudgetRead)
 def get_budget(
     budget_id: int,
@@ -443,6 +507,7 @@ def delete_line_item(
     db.commit()
 
 
+
 # ---------------------------------------------------------------------------
 # Budget ledger and alerts
 # ---------------------------------------------------------------------------
@@ -456,17 +521,41 @@ def list_budget_ledger(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    query = db.query(BudgetLedger).join(BudgetLedger.budget).join(Budget.matter)
+    query = (
+        db.query(BudgetLedger)
+        .join(BudgetLedger.budget)
+        .join(Budget.matter)
+    )
+
     if current_user.firm_id is not None:
-        query = query.filter(Matter.firm_id == current_user.firm_id)
+        query = query.filter(
+            Matter.firm_id == current_user.firm_id
+        )
+
     if budget_id is not None:
-        query = query.filter(BudgetLedger.budget_id == budget_id)
+        query = query.filter(
+            BudgetLedger.budget_id == budget_id
+        )
+
     if invoice_id is not None:
-        query = query.filter(BudgetLedger.invoice_id == invoice_id)
-    return query.order_by(BudgetLedger.ledger_id.desc()).offset(offset).limit(limit).all()
+        query = query.filter(
+            BudgetLedger.invoice_id == invoice_id
+        )
+
+    return (
+        query
+        .order_by(BudgetLedger.ledger_id.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
 
 
-@router.post("/budget-ledger", response_model=BudgetLedgerRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/budget-ledger",
+    response_model=BudgetLedgerRead,
+    status_code=status.HTTP_201_CREATED,
+)
 def create_budget_ledger(
     request: BudgetLedgerCreate,
     db: Session = Depends(get_db),
@@ -474,44 +563,359 @@ def create_budget_ledger(
 ):
     budget = db.get(Budget, request.budget_id)
     invoice = db.get(Invoice, request.invoice_id)
+
     if budget is None or invoice is None:
-        raise HTTPException(status_code=400, detail="budget_id and invoice_id must exist")
-    _ensure_firm_access(current_user, budget.matter.firm_id)
+        raise HTTPException(
+            status_code=400,
+            detail="budget_id and invoice_id must exist",
+        )
+
+    _ensure_firm_access(
+        current_user,
+        budget.matter.firm_id,
+    )
+
     entry = BudgetLedger(**request.model_dump())
+
     db.add(entry)
     db.commit()
     db.refresh(entry)
+
     return entry
 
 
-@router.get("/alerts", response_model=list[AlertRead])
+# Build one consistent, user-friendly alert payload for every frontend page.
+# This keeps internal IDs available while exposing firm, matter and invoice context.
+def _serialize_alert(db: Session, alert: Alert) -> dict:
+    """
+    Convert an alert into user-friendly data.
+
+    Internal IDs remain available for the frontend, but the UI can now show
+    business names instead of forcing users to understand database IDs.
+    """
+
+    budget = db.get(Budget, alert.budget_id)
+    matter = budget.matter if budget is not None else None
+    firm = matter.firm if matter is not None else None
+
+    invoice = (
+        db.get(Invoice, alert.invoice_id)
+        if alert.invoice_id is not None
+        else None
+    )
+
+    allocated = float(budget.allocated_amt or 0) if budget else 0.0
+
+    if budget and allocated > 0:
+        utilized = float(
+            db.query(BudgetLedger)
+            .filter(
+                BudgetLedger.budget_id == budget.budget_id,
+                BudgetLedger.entry_type == "invoice_approved",
+            )
+            .with_entities(
+                func.coalesce(
+                    func.sum(BudgetLedger.amount),
+                    0,
+                )
+            )
+            .scalar()
+            or 0
+        )
+
+        utilization_pct = (
+            utilized / allocated * 100
+            if allocated > 0
+            else 0.0
+        )
+    else:
+        utilized = 0.0
+        utilization_pct = 0.0
+
+    return {
+        "alert_id": alert.alert_id,
+        "budget_id": alert.budget_id,
+        "invoice_id": alert.invoice_id,
+        "type": alert.type,
+        "message": alert.message,
+        "is_active": alert.is_active,
+        "created_at": alert.created_at,
+        "resolved_at": alert.resolved_at,
+
+        # User-friendly firm information
+        "firm_id": firm.firm_id if firm else None,
+        "firm_name": firm.name if firm else None,
+        "firm_address": firm.address if firm else None,
+
+        # User-friendly matter information
+        "matter_id": matter.matter_id if matter else None,
+        "matter_no": matter.matter_no if matter else None,
+        "matter_name": matter.name if matter else None,
+
+        # User-friendly invoice information
+        "invoice_no": invoice.invoice_no if invoice else None,
+        "invoice_status": invoice.status if invoice else None,
+        "invoice_amount": (
+            float(invoice.total_amount or 0)
+            if invoice else None
+        ),
+
+        # Current budget position
+        "allocated": allocated,
+        "utilized": utilized,
+        "utilization_pct": utilization_pct,
+        "threshold_pct": (
+            float(budget.threshold_pct or 0)
+            if budget else None
+        ),
+    }
+
+
+@router.get("/alerts")
 def list_alerts(
     budget_id: int | None = None,
+    active_only: bool = True,
     offset: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    query = db.query(Alert).join(Alert.budget).join(Budget.matter)
+    """
+    Return alerts enriched with firm, matter, invoice and budget information.
+    """
+
+    query = (
+        db.query(Alert)
+        .join(Alert.budget)
+        .join(Budget.matter)
+    )
+
     if current_user.firm_id is not None:
-        query = query.filter(Matter.firm_id == current_user.firm_id)
+        query = query.filter(
+            Matter.firm_id == current_user.firm_id
+        )
+
     if budget_id is not None:
-        query = query.filter(Alert.budget_id == budget_id)
-    return query.order_by(Alert.alert_id.desc()).offset(offset).limit(limit).all()
+        query = query.filter(
+            Alert.budget_id == budget_id
+        )
+
+    if active_only:
+        query = query.filter(
+            Alert.is_active.is_(True)
+        )
+
+    alerts = (
+        query
+        .order_by(Alert.alert_id.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    return [
+        _serialize_alert(db, alert)
+        for alert in alerts
+    ]
 
 
-@router.post("/alerts", response_model=AlertRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/alerts",
+    response_model=AlertRead,
+    status_code=status.HTTP_201_CREATED,
+)
 def create_alert(
     request: AlertCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([ADMIN, EDITOR])),
 ):
     budget = db.get(Budget, request.budget_id)
+
     if budget is None:
-        raise HTTPException(status_code=400, detail="budget_id does not exist")
-    _ensure_firm_access(current_user, budget.matter.firm_id)
+        raise HTTPException(
+            status_code=400,
+            detail="budget_id does not exist",
+        )
+
+    _ensure_firm_access(
+        current_user,
+        budget.matter.firm_id,
+    )
+
+    if request.invoice_id is not None:
+        invoice = db.get(
+            Invoice,
+            request.invoice_id,
+        )
+
+        if invoice is None:
+            raise HTTPException(
+                status_code=400,
+                detail="invoice_id does not exist",
+            )
+
+        if invoice.matter_id != budget.matter_id:
+            raise HTTPException(
+                status_code=422,
+                detail="Alert invoice must belong to the budget's matter.",
+            )
+
     alert = Alert(**request.model_dump())
+
     db.add(alert)
     db.commit()
     db.refresh(alert)
+
     return alert
+
+
+@router.patch("/alerts/{alert_id}/dismiss")
+def dismiss_alert(
+    alert_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([ADMIN, EDITOR])),
+):
+    """
+    Dismiss an alert without deleting it.
+
+    The database row remains for history/audit purposes.
+    Only the active flag is turned off.
+    """
+
+    alert = db.get(Alert, alert_id)
+
+    if alert is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Alert not found",
+        )
+
+    budget = db.get(Budget, alert.budget_id)
+
+    if budget is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Budget associated with this alert was not found",
+        )
+
+    _ensure_firm_access(
+        current_user,
+        budget.matter.firm_id,
+    )
+
+    if alert.is_active:
+        alert.is_active = False
+        alert.resolved_at = datetime.now(timezone.utc)
+
+        db.commit()
+        db.refresh(alert)
+
+    return {
+        "message": "Alert dismissed successfully.",
+        "alert_id": alert.alert_id,
+        "is_active": alert.is_active,
+        "resolved_at": alert.resolved_at,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Automatic budget management hierarchy and adjustment history
+# ---------------------------------------------------------------------------
+@router.get("/budgets/{budget_id}/adjustments")
+def list_budget_adjustments(
+    budget_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    budget = db.get(Budget, budget_id)
+    if budget is None:
+        raise HTTPException(status_code=404, detail="Budget not found")
+    matter = _get_matter_or_404(db, budget.matter_id)
+    _ensure_firm_access(current_user, matter.firm_id)
+
+    rows = (
+        db.query(BudgetAdjustment)
+        .filter(BudgetAdjustment.budget_id == budget_id)
+        .order_by(BudgetAdjustment.adjustment_id.desc())
+        .all()
+    )
+    result = []
+    for row in rows:
+        invoice = db.get(Invoice, row.invoice_id) if row.invoice_id is not None else None
+        result.append({
+            "adjustment_id": row.adjustment_id,
+            "invoice_id": row.invoice_id,
+            "invoice_no": invoice.invoice_no if invoice else None,
+            "previous_amount": float(row.previous_amount),
+            "adjustment_amount": float(row.adjustment_amount),
+            "new_amount": float(row.new_amount),
+            "adjustment_type": row.adjustment_type,
+            "reason": row.reason,
+            "confirmed": row.confirmed,
+            "adjusted_by_user_id": row.adjusted_by_user_id,
+            "created_at": row.created_at,
+        })
+    return result
+
+
+@router.post("/budgets/{budget_id}/adjustments")
+def create_budget_adjustment(
+    budget_id: int,
+    request: BudgetAdjustmentCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([ADMIN])),
+):
+    budget = db.get(Budget, budget_id)
+    if budget is None:
+        raise HTTPException(status_code=404, detail="Budget not found")
+    matter = _get_matter_or_404(db, budget.matter_id)
+    _ensure_firm_access(current_user, matter.firm_id)
+
+    if request.invoice_id is not None:
+        related = db.get(Invoice, request.invoice_id)
+        if related is None or related.matter_id != budget.matter_id:
+            raise HTTPException(
+                status_code=422,
+                detail="Related invoice must belong to this budget's matter.",
+            )
+
+    try:
+        row = adjust_budget(
+            db,
+            budget=budget,
+            amount=request.adjustment_amount,
+            reason=request.reason,
+            confirmed=request.confirmed,
+            user=current_user,
+            invoice_id=request.invoice_id,
+        )
+        reconciliation = reconcile_budget_after_adjustment(
+            db,
+            budget=budget,
+            user=current_user,
+        )
+        db.commit()
+        db.refresh(row)
+        db.refresh(budget)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    related_invoice = db.get(Invoice, row.invoice_id) if row.invoice_id is not None else None
+
+    return {
+        "adjustment_id": row.adjustment_id,
+        "invoice_id": row.invoice_id,
+        "invoice_no": related_invoice.invoice_no if related_invoice else None,
+        "previous_amount": float(row.previous_amount),
+        "adjustment_amount": float(row.adjustment_amount),
+        "new_amount": float(row.new_amount),
+        "reason": row.reason,
+        "confirmed": row.confirmed,
+        "reconciliation": reconciliation,
+        "message": (
+            f"Budget {'increased' if row.adjustment_amount > 0 else 'decreased'} successfully. "
+            f"{len(reconciliation['auto_approved'])} invoice(s) auto-approved after reconciliation; "
+            f"{len(reconciliation['still_pending'])} still require review."
+        ),
+    }

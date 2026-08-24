@@ -1,0 +1,24 @@
+File,Scenario,Firm,Matter ID,Matter Name,Invoice No,Invoice Total
+01_NORTHSTAR_NEW_20000.pdf,New firm + new matter: auto-create default budget,NORTHSTAR LEGAL GROUP LLP,MAT-2088,Orion Systems v. Delta Labs,NS-2088-0001,20000
+02_NORTHSTAR_SAME_MATTER_30000.pdf,Same firm + same matter: reuse existing budget,NORTHSTAR LEGAL GROUP LLP,MAT-2088,Orion Systems v. Delta Labs,NS-2088-0002,30000
+03_NORTHSTAR_79_PERCENT_29000.pdf,Cumulative utilization reaches 79%,NORTHSTAR LEGAL GROUP LLP,MAT-2088,Orion Systems v. Delta Labs,NS-2088-0003,29000
+04_NORTHSTAR_THRESHOLD_3000.pdf,Cumulative utilization reaches 82%; threshold alert,NORTHSTAR LEGAL GROUP LLP,MAT-2088,Orion Systems v. Delta Labs,NS-2088-0004,3000
+05_NORTHSTAR_NEAR_LIMIT_15000.pdf,Cumulative utilization reaches 97%; near budget limit,NORTHSTAR LEGAL GROUP LLP,MAT-2088,Orion Systems v. Delta Labs,NS-2088-0005,15000
+06_NORTHSTAR_OVER_BUDGET_8000.pdf,Cumulative utilization reaches 105%; over budget,NORTHSTAR LEGAL GROUP LLP,MAT-2088,Orion Systems v. Delta Labs,NS-2088-0006,8000
+07_NORTHSTAR_VARIATION_SAME_ID_5000.pdf,Name/case variation with same MAT-2088; should resolve to existing matter by Matter ID,NORTHSTAR LEGAL GROUP LLP,MAT-2088,ORION SYSTEMS V. DELTA LABS,NS-2088-0007,5000
+08_NORTHSTAR_AFTER_INCREASE_10000.pdf,"Upload after increasing budget by $25,000; tests adjusted budget",NORTHSTAR LEGAL GROUP LLP,MAT-2088,Orion Systems v. Delta Labs,NS-2088-0008,10000
+09_NORTHSTAR_DIFFERENT_ID_12000.pdf,"Same firm + same matter name, but different Matter ID: separate budget",NORTHSTAR LEGAL GROUP LLP,MAT-2099,Orion Systems v. Delta Labs,NS-2099-0001,12000
+10_VERTEX_NEW_MATTER_40000.pdf,Different firm + same matter name: separate budget under Vertex,VERTEX LAW PARTNERS LLP,MAT-7001,Orion Systems v. Delta Labs,VL-7001-0001,40000
+11_VERTEX_SAME_MATTER_40000.pdf,Same Vertex matter; cumulative utilization reaches exactly 80%,VERTEX LAW PARTNERS LLP,MAT-7001,Orion Systems v. Delta Labs,VL-7001-0002,40000
+12_VERTEX_DIFFERENT_MATTER_15000.pdf,Same firm but completely different matter: separate budget,VERTEX LAW PARTNERS LLP,MAT-7002,Delta Labs v. Nova Analytics,VL-7002-0001,15000
+13_APEX_IMMEDIATE_OVER_BUDGET_120000.pdf,Single invoice exceeds default budget immediately,APEX LEGAL ASSOCIATES,MAT-9001,Acme Corp. v. Zenith Industries,AL-9001-0001,120000
+14_APEX_NORMAL_UNDER_BUDGET_25000.pdf,New APEX matter under budget,APEX LEGAL ASSOCIATES,MAT-9002,Employment Contract Dispute,AL-9002-0001,25000
+15_HARBOR_60000.pdf,New Harbor matter at 60% utilization,HARBOR & CO. LEGAL,MAT-5100,Mariner Shipping v. Oceanic Trade,HB-5100-0001,60000
+16_HARBOR_25000.pdf,Same Harbor matter at 85%; threshold reached,HARBOR & CO. LEGAL,MAT-5100,Mariner Shipping v. Oceanic Trade,HB-5100-0002,25000
+17_HARBOR_AFTER_ADJUSTMENT_10000.pdf,Upload after an optional budget increase/decrease adjustment,HARBOR & CO. LEGAL,MAT-5100,Mariner Shipping v. Oceanic Trade,HB-5100-0003,10000
+18_SUMMIT_NEW_10000.pdf,New firm/matter. Same MAT-2088 ID/name as Northstar is allowed because firm differs,SUMMIT CORPORATE LAW LLP,MAT-2088,Orion Systems v. Delta Labs,SM-2088-0001,10000
+19_SUMMIT_DUPLICATE_INVOICE_NO.pdf,Exact duplicate of SUMMIT invoice number; upload after invoice 18 to test duplicate detection,SUMMIT CORPORATE LAW LLP,MAT-2088,Orion Systems v. Delta Labs,SM-2088-0001,10000
+20_RIVERSTONE_MULTILINE_EXPENSE.pdf,Multiple timekeepers and line items plus expenses; tests extraction and budget total,RIVERSTONE LEGAL COUNSEL,MAT-6200,Technology Licensing Dispute,RV-6200-0001,24000
+21_MISSING_MATTER_ID.pdf,Missing Matter ID; manual Matter No. override/resolution flow,APEX LEGAL ASSOCIATES,MISSING,Confidential Employment Dispute,AL-UNKNOWN-0001,7500
+22_MISSING_FIRM.pdf,Missing firm name/address; validation/error path,MISSING,MAT-3001,Missing Firm Test Matter,NOFIRM-3001,5000
+23_ZERO_AMOUNT.pdf,Zero-value invoice; must not consume budget incorrectly,RIVERSTONE LEGAL COUNSEL,MAT-ZERO,Zero Amount Matter,RV-ZERO-0001,0

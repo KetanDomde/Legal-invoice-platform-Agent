@@ -317,19 +317,4 @@ with right:
                     e.detail
                 )
 
-        st.caption(
-            (
-                "All decisions are recorded in the audit trail. "
-                "Budget overrides require a documented reason."
-            )
-        )
-
-
-st.markdown("---")
-
-if st.button(
-    "← Back to Review Queue"
-):
-    st.switch_page(
-        "pages/6_Review_Queue.py"
-    )
+        st.caption("Decision support only — this action is final once submitted and is recorded in the audit trail.")

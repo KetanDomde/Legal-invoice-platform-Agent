@@ -657,13 +657,7 @@ def validate(state: InvoiceGraphState) -> InvoiceGraphState:
 
 
 def persist_invoice(state: InvoiceGraphState) -> InvoiceGraphState:
-    invoice = persist_extracted_invoice(
-        state["db"],
-        matter_id=state["matter_id"],
-        firm_id=state["firm_id"],
-        fields=state["extracted"],
-        confidence=state["confidence_score"],
-    )
+    invoice = persist_extracted_invoice(state)
 
     # Persist the immutable intake snapshot immediately after the invoice gets
     # a real id. The snapshot powers the budget decision/history UI and must

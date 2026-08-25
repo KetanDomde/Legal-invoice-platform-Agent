@@ -524,15 +524,9 @@ def get_review_reasons(invoice: Invoice) -> list[str]:
     return reasons or ["Invoice requires manual review."]
 
 
-def get_review_queue(db: Session, firm_id: int) -> list[dict]:
-    invoices = (
-        db.query(Invoice)
-        .filter(
-            Invoice.firm_id == firm_id,
-            Invoice.status.in_([HUMAN_REVIEW.replace("human_review", "pending_review"), "clarification_requested"]),
-        )
-        .order_by(Invoice.invoice_date.asc().nulls_last(), Invoice.invoice_id.asc())
-        .all()
+def get_review_queue(db: Session, firm_id: int | None) -> list[dict]:
+    query = db.query(Invoice).filter(
+        Invoice.status.in_([HUMAN_REVIEW, "clarification_requested"])
     )
     if firm_id is not None:
         query = query.filter(Invoice.firm_id == firm_id)

@@ -7,7 +7,16 @@ from app.services.budget import (
     get_invoice_budget_context,
     post_approved_invoice_to_budget,
 )
-from app.services.invoice import add_audit_log
+from app.services.invoice import add_audit_log, validate_invoice
+
+
+def _apply_validation_result(invoice: Invoice, result: dict) -> None:
+    """Refresh the invoice's cached validation fields from a fresh check."""
+    invoice.confidence_score = result["confidence_score"]
+    invoice.budget_valid = result["budget_ok"]
+    invoice.duplicate_flag = result["duplicate"]
+    invoice.validation_status = "passed" if result["validation_passed"] else "failed"
+    invoice.validation_message = "; ".join(result["reasons"])
 
 
 def auto_approve_invoice(
@@ -82,14 +91,22 @@ def approve_invoice(
     notes: str | None = None,
 ) -> Invoice:
     """
-    Human approval.
+    Human approval decision.
 
-    Product rules:
-      1. A matter with no budget cannot be approved.
-      2. An invoice within budget can be approved normally.
-      3. An over-budget invoice can be approved as a human override.
-      4. An over-budget override requires a non-empty reason.
-      5. Every approval is posted to BudgetLedger exactly once.
+    Approval can NEVER bypass duplicate, validation, or budget checks:
+      1. The invoice must currently be pending_review.
+      2. Duplicate detection and budget adequacy are re-checked at the
+         moment of approval via the same canonical validate_invoice() used
+         at intake — cached flags from the original review are never
+         trusted blindly, since the matter's budget or other invoices may
+         have changed since the invoice entered the queue.
+      3. If re-validation finds a blocking duplicate or a budget shortfall
+         (including a missing budget), the invoice is NOT approved. It is
+         kept as an exception in the review queue with refreshed reasons,
+         and the blocked attempt is audit logged. There is no reviewer
+         override for these checks.
+      4. Only when duplicate + budget checks both pass is the invoice
+         posted to BudgetLedger (exactly once) and marked approved.
     """
 
     if invoice.status != "pending_review":
@@ -97,25 +114,43 @@ def approve_invoice(
             "Only invoices pending review can be approved."
         )
 
-    budget_context = get_invoice_budget_context(
-        db=db,
-        invoice=invoice,
-    )
+    # Step 1: re-validate — duplicate + budget are recomputed fresh.
+    result = validate_invoice(db, invoice)
+    _apply_validation_result(invoice, result)
 
-    if not budget_context["has_budget"]:
+    blocking_reasons: list[str] = []
+    if not result["has_budget"]:
+        blocking_reasons.append("No budget is configured for this matter.")
+    elif not result["budget_ok"]:
+        blocking_reasons.append(
+            f"Invoice amount {float(invoice.total_amount):.2f} exceeds "
+            f"remaining budget {result['remaining_budget']:.2f}."
+        )
+    if result["duplicate"]:
+        blocking_reasons.append("Duplicate invoice detected.")
+
+    if blocking_reasons:
+        old_status = invoice.status
+        db.add(invoice)
+        add_audit_log(
+            db=db,
+            action="approval_blocked",
+            user_id=user_id if user_id is not None else -1,
+            invoice_id=invoice.invoice_id,
+            notes=(
+                f"Approval attempt on invoice in '{old_status}' was blocked "
+                "and sent back to the review queue as an exception. "
+                f"Reasons: {'; '.join(blocking_reasons)}"
+            ),
+        )
+        db.commit()
+        db.refresh(invoice)
         raise ValueError(
-            "Cannot approve this invoice because the matter has no configured budget. "
-            "Create a budget first, then re-run the review."
+            "Invoice failed re-validation and cannot be approved: "
+            + "; ".join(blocking_reasons)
         )
 
-    override_required = budget_context["projected_over_budget"]
-    clean_notes = (notes or "").strip()
-
-    if override_required and not clean_notes:
-        raise ValueError(
-            "Approval reason is required when overriding the remaining budget."
-        )
-
+    # Step 2: budget check passed — post to ledger exactly once and approve.
     budget_result = post_approved_invoice_to_budget(
         db=db,
         invoice=invoice,
@@ -126,28 +161,19 @@ def approve_invoice(
 
     summary = budget_result["summary"]
 
-    if override_required:
-        action = "approved_budget_override"
-        audit_note = (
-            f"Status changed from '{old_status}' to 'approved' using a budget override. "
-            f"Reason: {clean_notes} "
-            f"Budget utilization is now {summary['pct_used']:.1f}%. "
-            f"Remaining budget is ${summary['remaining']:,.2f}."
-        )
-    else:
-        action = "approved"
-        audit_note = (
-            f"Status changed from '{old_status}' to 'approved'. "
-            f"Budget utilization is now {summary['pct_used']:.1f}%. "
-            f"Remaining budget is ${summary['remaining']:,.2f}."
-        )
+    audit_note = (
+        f"Status changed from '{old_status}' to 'approved' after re-validation. "
+        f"Budget utilization is now {summary['pct_used']:.1f}%. "
+        f"Remaining budget is ${summary['remaining']:,.2f}."
+    )
 
-        if clean_notes:
-            audit_note += f" Reviewer notes: {clean_notes}"
+    clean_notes = (notes or "").strip()
+    if clean_notes:
+        audit_note += f" Reviewer notes: {clean_notes}"
 
     add_audit_log(
         db=db,
-        action=action,
+        action="approved",
         user_id=user_id if user_id is not None else -1,
         invoice_id=invoice.invoice_id,
         notes=audit_note,

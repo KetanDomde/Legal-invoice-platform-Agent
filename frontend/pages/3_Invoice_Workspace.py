@@ -12,18 +12,148 @@ require_login()
 client = get_client()
 user = st.session_state["user"]
 
-invoice = pick_invoice(label="Open Invoice")
+
+# ---------------------------------------------------------------------------
+# Invoice Search / Filters
+# ---------------------------------------------------------------------------
+
+st.markdown("### Find Invoice")
+
+try:
+    firms_list = client.list_firms()
+    matters_list = client.list_matters()
+except APIError as e:
+    st.error(f"Couldn't load invoice filters: {e.detail}")
+    st.stop()
+
+
+# Firm filter
+firm_options = {
+    "All Firms": None
+}
+
+for firm in firms_list:
+    firm_options[
+        f"{firm['name']} (ID: {firm['firm_id']})"
+    ] = firm["firm_id"]
+
+
+selected_firm_label = st.selectbox(
+    "Search by Firm / Vendor",
+    list(firm_options.keys()),
+)
+
+selected_firm_id = firm_options[selected_firm_label]
+
+
+# Matter filter
+matter_options = {
+    "All Matters": None
+}
+
+# If a firm is selected, only show matters belonging to that firm
+for matter in matters_list:
+
+    if (
+        selected_firm_id is not None
+        and matter["firm_id"] != selected_firm_id
+    ):
+        continue
+
+    matter_options[
+        f"{matter['name']} (ID: {matter['matter_id']})"
+    ] = matter["matter_id"]
+
+
+selected_matter_label = st.selectbox(
+    "Search by Matter",
+    list(matter_options.keys()),
+)
+
+selected_matter_id = matter_options[selected_matter_label]
+
+
+# ---------------------------------------------------------------------------
+# Invoice picker
+# ---------------------------------------------------------------------------
+
+invoice = pick_invoice(
+    label="Open Invoice",
+    matter_id=selected_matter_id,
+    firm_id=selected_firm_id,
+)
+
 if not invoice:
     st.stop()
+    
+
 
 try:
     matters = {m["matter_id"]: m for m in client.list_matters()}
+    firms = {f["firm_id"]: f for f in client.list_firms()}
     line_items = client.list_line_items(invoice_id=invoice["invoice_id"]) or []
 except APIError as e:
     st.error(f"Couldn't load workspace data: {e.detail}")
     st.stop()
 
 matter = matters.get(invoice["matter_id"], {})
+firm = firms.get(invoice["firm_id"], {})
+
+left, right = st.columns([2, 1])
+
+with left:
+    with st.container(border=True):
+
+        st.markdown("#### Invoice Header")
+
+        kv_row(
+            "Invoice ID",
+            f"#{invoice['invoice_id']}"
+        )
+
+        kv_row(
+            "Invoice No.",
+            invoice.get("invoice_no") or "—"
+        )
+
+        kv_row(
+            "Vendor / Firm",
+            firm.get(
+                "name",
+                f"Firm {invoice['firm_id']}"
+            )
+        )
+
+        kv_row(
+            "Matter",
+            matter.get(
+                "name",
+                f"Matter {invoice['matter_id']}"
+            )
+        )
+
+        kv_row(
+            "Invoice Date",
+            invoice.get("invoice_date") or "—"
+        )
+
+        kv_row(
+            "Total Amount",
+            (
+                f"${invoice['total_amount']:,.2f}"
+                if invoice.get("total_amount") is not None
+                else "—"
+            )
+        )
+
+        kv_row(
+            "Current Status",
+            status_badge(invoice["status"])
+        )
+        
+
+
+
 
 page_header(3, "Invoice Workspace / Invoice Detail",
             "Central invoice view — status, line items, artifacts, and audit trail, all live from the database.",
@@ -33,10 +163,10 @@ TIMELINE_STEPS = ["Submitted", "Extracted & Validated", "Under Review", "Decisio
 
 
 def _step_state(idx: int, status: str):
-    order = ["submitted", "pending_review", "under_review", "clarification_requested", "approved", "rejected"]
+    order = ["submitted", "pending_review", "under_review", "clarification_required", "approved", "rejected"]
     if status in ("approved", "rejected"):
         reached = 4
-    elif status in ("under_review", "pending_review", "clarification_requested"):
+    elif status in ("under_review", "pending_review", "clarification_required"):
         reached = 3
     else:
         reached = 2  # any recorded status beyond raw "submitted" means extraction ran
@@ -55,12 +185,30 @@ left, right = st.columns([2, 1])
 with left:
     with st.container(border=True):
         st.markdown("#### Invoice Header")
+
         kv_row("Invoice ID", f"#{invoice['invoice_id']}")
         kv_row("Invoice No.", invoice.get("invoice_no") or "—")
-        kv_row("Matter", matter.get("name", f"Matter {invoice['matter_id']}"))
+
+        # Vendor / Law Firm that owns the invoice
+        kv_row(
+            "Vendor / Firm",
+            firm.get("name", f"Firm {invoice['firm_id']}")
+        )
+
+        kv_row(
+            "Matter",
+            matter.get("name", f"Matter {invoice['matter_id']}")
+        )
+
         kv_row("Invoice Date", invoice.get("invoice_date") or "—")
-        kv_row("Total Amount", f"${invoice['total_amount']:,.2f}" if invoice.get("total_amount") is not None else "—")
+        kv_row(
+            "Total Amount",
+            f"${invoice['total_amount']:,.2f}"
+            if invoice.get("total_amount") is not None
+            else "—"
+        )
         kv_row("Current Status", status_badge(invoice["status"]))
+        
 
         st.markdown("#### Line Items")
         if line_items:
@@ -87,7 +235,7 @@ with right:
             st.switch_page("pages/4_Matter_and_Budget.py")
         if st.button("Validation & Duplicate Check →", use_container_width=True):
             st.switch_page("pages/5_Validation_Check.py")
-        if user["role"] in ("admin", "editor") and invoice["status"] in ("under_review", "pending_review", "clarification_requested"):
+        if user["role"] in ("admin", "editor") and invoice["status"] in ("under_review", "pending_review", "clarification_required"):
             if st.button("Review Decision →", use_container_width=True, type="primary"):
                 st.switch_page("pages/7_Review_Decision.py")
 

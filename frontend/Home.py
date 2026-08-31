@@ -108,8 +108,8 @@ render_banner(
 )
 
 
-if not st.session_state.get("token"):
-
+if not st.session_state.get("token") or not st.session_state.get("user"):
+    
     if st.session_state.pop(
         "session_expired",
         False,

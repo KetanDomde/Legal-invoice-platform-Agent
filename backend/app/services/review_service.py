@@ -1,33 +1,42 @@
-# TODO: review_queue.py
 from __future__ import annotations
 
 from sqlalchemy.orm import Session
-from app.models.invoice import Invoice
 
-from app.services.invoice import add_audit_log
-from app.services.invoice import add_audit_log
+from app.models.invoice import Invoice
+from app.services.invoice import (
+    add_audit_log,
+    get_review_reasons,
+    validate_invoice,
+)
+
 
 REVIEW_STATUSES = [
     "pending_review",
-    "clarification_requested",
+    "clarification_required",
 ]
 
 
 def get_review_queue(
     db: Session,
-    firm_id: int,
+    firm_id: int | None,
 ):
     """
     Return invoices requiring human review
     for the current firm.
     """
 
-    invoices = (
-        db.query(Invoice)
-        .filter(
-            Invoice.firm_id == firm_id,
-            Invoice.status.in_(REVIEW_STATUSES),
+    query = db.query(Invoice).filter(
+        Invoice.status.in_(REVIEW_STATUSES)
+    )
+
+    # Global users can see all firms.
+    if firm_id is not None:
+        query = query.filter(
+            Invoice.firm_id == firm_id
         )
+
+    invoices = (
+        query
         .order_by(Invoice.invoice_date.asc())
         .all()
     )
@@ -35,7 +44,6 @@ def get_review_queue(
     results = []
 
     for invoice in invoices:
-
         results.append(
             {
                 "invoice_id": invoice.invoice_id,
@@ -43,47 +51,18 @@ def get_review_queue(
                 "firm_id": invoice.firm_id,
                 "invoice_no": invoice.invoice_no,
                 "invoice_date": invoice.invoice_date,
-                "total_amount": invoice.total_amount,
+                "total_amount": float(invoice.total_amount),
                 "status": invoice.status,
                 "confidence_score": invoice.confidence_score,
                 "budget_valid": invoice.budget_valid,
                 "duplicate_flag": invoice.duplicate_flag,
                 "validation_status": invoice.validation_status,
                 "validation_message": invoice.validation_message,
-                "review_reasons": build_review_reasons(invoice),
+                "review_reasons": get_review_reasons(invoice),
             }
         )
 
     return results
-
-
-# TODO: review_reason.py
-
-CONFIDENCE_THRESHOLD = 0.85
-
-
-def build_review_reasons(invoice) -> list[str]:
-    """Canonical human-readable reasons an invoice landed in the review queue."""
-    reasons: list[str] = []
-
-    confidence = invoice.confidence_score
-    if confidence is not None and confidence < CONFIDENCE_THRESHOLD:
-        reasons.append("Extraction confidence is below threshold")
-
-    if invoice.budget_valid is False:
-        reasons.append("Invoice failed budget validation")
-
-    if invoice.duplicate_flag:
-        reasons.append("Possible duplicate invoice detected")
-
-    if not reasons:
-        reasons.append("Invoice requires manual review")
-
-    return reasons
-
-
-# TODO: rejection_service.py
-
 
 
 def reject_invoice(
@@ -92,36 +71,50 @@ def reject_invoice(
     user_id: int | None = None,
     reason: str = "",
 ) -> Invoice:
-    """Reject a pending-review invoice.
+    """
+    Reject an invoice from the human review queue.
 
-    Canonical implementation — mirrors app.workflow.approval_service so
-    review actions (approve / reject / clarify) all live in workflow/.
+    Rejection:
+        pending_review
+            ↓
+        rejected
+            ↓
+        workflow stops
     """
 
     if invoice.status != "pending_review":
-        raise ValueError("Only invoices pending review can be rejected.")
-    if not reason.strip():
-        raise ValueError("Rejection reason is required.")
+        raise ValueError(
+            "Only invoices pending review can be rejected."
+        )
+
+    clean_reason = (reason or "").strip()
+
+    if not clean_reason:
+        raise ValueError(
+            "Rejection reason is required."
+        )
 
     old_status = invoice.status
+
     invoice.status = "rejected"
+
     db.add(invoice)
 
     add_audit_log(
-        db,
+        db=db,
         action="rejected",
-        user_id=user_id,
+        user_id=user_id if user_id is not None else -1,
         invoice_id=invoice.invoice_id,
-        notes=f"Status changed from '{old_status}' to 'rejected'. Reason: {reason}",
+        notes=(
+            f"Status changed from '{old_status}' to 'rejected'. "
+            f"Reason: {clean_reason}"
+        ),
     )
 
     db.commit()
     db.refresh(invoice)
+
     return invoice
-
-
-# TODO: clarification_service.py
-
 
 
 def request_clarification(
@@ -130,123 +123,46 @@ def request_clarification(
     user_id: int | None = None,
     reason: str = "",
 ) -> Invoice:
-    """Move a pending-review invoice into 'clarification_requested'.
-
-    Canonical implementation — mirrors app.workflow.approval_service so
-    review actions (approve / reject / clarify) all live in workflow/.
     """
+    Request additional information from the requester.
+
+    Flow:
+        pending_review
+            ↓
+        clarification_required
+            ↓
+        workflow pauses
+    """
+
     if invoice.status != "pending_review":
         raise ValueError(
-            "Clarification can only be requested for invoices pending review."
-        )
-    if not reason.strip():
-        raise ValueError("Clarification reason is required.")
-
-    old_status = invoice.status
-    invoice.status = "clarification_requested"
-    db.add(invoice)
-
-    add_audit_log(
-        db,
-        action="clarification_requested",
-        user_id=user_id,
-        invoice_id=invoice.invoice_id,
-        notes=f"Status changed from '{old_status}' to 'clarification_requested'. Reason: {reason}",
-    )
-
-    db.commit()
-    db.refresh(invoice)
-    return invoice
-
-
-# TODO: approval_service.py
-
-
-# add near the top of the file
-AUTO_APPROVABLE_STATUSES = {"submitted", "pending_review"}
-
-
-def post_approved_invoice_to_budget(
-    db: Session,
-    invoice: Invoice,
-) -> dict:
-
-    from app.models import Budget, BudgetLedger
-
-    budget = db.query(Budget).filter(Budget.matter_id == invoice.matter_id).first()
-
-    if budget is None:
-        return {
-            "invoice_id": invoice.invoice_id,
-            "amount_posted": invoice.total_amount,
-            "status": "no_budget_configured",
-        }
-
-    existing = (
-        db.query(BudgetLedger)
-        .filter(
-            BudgetLedger.invoice_id == invoice.invoice_id,
-            BudgetLedger.entry_type == "invoice_approved",
-        )
-        .first()
-    )
-
-    if existing is None:
-
-        db.add(
-            BudgetLedger(
-                budget_id=budget.budget_id,
-                invoice_id=invoice.invoice_id,
-                amount=invoice.total_amount,
-                entry_type="invoice_approved",
-            )
+            "Clarification can only be requested "
+            "for invoices pending review."
         )
 
-    return {
-        "invoice_id": invoice.invoice_id,
-        "amount_posted": invoice.total_amount,
-        "status": "posted",
-    }
+    clean_reason = (reason or "").strip()
 
-
-def auto_approve_invoice(
-    db: Session,
-    invoice: Invoice,
-) -> Invoice:
-    """
-    System-generated approval.
-
-    Used only when the LangGraph validation rules
-    have determined that the invoice qualifies
-    for automatic approval.
-    """
-
-    if invoice.status != "submitted":
-        raise ValueError("Only submitted invoices can be auto-approved.")
-
-    budget_result = post_approved_invoice_to_budget(
-        db=db,
-        invoice=invoice,
-    )
+    if not clean_reason:
+        raise ValueError(
+            "Clarification question/comment is required."
+        )
 
     old_status = invoice.status
 
-    invoice.status = "approved"
+    invoice.status = "clarification_required"
 
     db.add(invoice)
 
-    note = (
-        f"Status changed from '{old_status}' "
-        f"to 'approved' automatically. "
-        f"Budget: {budget_result['status']}."
-    )
-
     add_audit_log(
         db=db,
-        action="auto_approved",
-        user_id=-1,
+        action="clarification_required",
+        user_id=user_id if user_id is not None else -1,
         invoice_id=invoice.invoice_id,
-        notes=note,
+        notes=(
+            f"Status changed from '{old_status}' "
+            f"to 'clarification_required'. "
+            f"Question/comment: {clean_reason}"
+        ),
     )
 
     db.commit()
@@ -255,40 +171,93 @@ def auto_approve_invoice(
     return invoice
 
 
-def approve_invoice(
+def resolve_clarification(
     db: Session,
     invoice: Invoice,
     user_id: int | None = None,
-    notes: str | None = None,
+    information: str = "",
 ) -> Invoice:
+    """
+    Handle information received after clarification.
 
-    if invoice.status != "pending_review":
-        raise ValueError("Only invoices pending review can be approved.")
+    IMPORTANT:
+    The invoice is revalidated and returned to the human
+    review queue. It is NOT automatically approved.
+    """
 
-    budget_result = post_approved_invoice_to_budget(
-        db=db,
-        invoice=invoice,
-    )
+    if invoice.status != "clarification_required":
+        raise ValueError(
+            "Only invoices requiring clarification "
+            "can be resolved."
+        )
 
-    old_status = invoice.status
+    clean_information = (information or "").strip()
 
-    invoice.status = "approved"
+    if not clean_information:
+        raise ValueError(
+            "Clarification information is required."
+        )
 
-    db.add(invoice)
-
-    audit_note = f"Status changed from '{old_status}' " f"to 'approved'."
-
-    if notes:
-        audit_note += f" Reason: {notes}"
-
-    audit_note += f" Budget: {budget_result['status']}."
+    # ---------------------------------------------------------
+    # 1. Save the clarification information in audit history
+    # ---------------------------------------------------------
 
     add_audit_log(
         db=db,
-        action="approved",
-        user_id=user_id,
+        action="clarification_provided",
+        user_id=user_id if user_id is not None else -1,
         invoice_id=invoice.invoice_id,
-        notes=audit_note,
+        notes=(
+            "Information provided after clarification request: "
+            f"{clean_information}"
+        ),
+    )
+
+    # ---------------------------------------------------------
+    # 2. Re-run server-side invoice validation
+    # ---------------------------------------------------------
+
+    validation_result = validate_invoice(
+        db=db,
+        invoice=invoice,
+        confidence_score=invoice.confidence_score,
+    )
+
+    invoice.budget_valid = validation_result["budget_ok"]
+
+    invoice.duplicate_flag = validation_result["duplicate"]
+
+    invoice.validation_status = (
+        "passed"
+        if validation_result["validation_passed"]
+        else "failed"
+    )
+
+    invoice.validation_message = "; ".join(
+        validation_result["reasons"]
+    )
+
+    # ---------------------------------------------------------
+    # 3. NEVER automatically approve after clarification
+    # ---------------------------------------------------------
+
+    invoice.status = "pending_review"
+
+    db.add(invoice)
+
+    add_audit_log(
+        db=db,
+        action="revalidated_after_clarification",
+        user_id=user_id if user_id is not None else -1,
+        invoice_id=invoice.invoice_id,
+        notes=(
+            "Invoice was revalidated after clarification "
+            "and returned to human review. "
+            f"Validation status: "
+            f"{invoice.validation_status}. "
+            f"Message: "
+            f"{invoice.validation_message}"
+        ),
     )
 
     db.commit()

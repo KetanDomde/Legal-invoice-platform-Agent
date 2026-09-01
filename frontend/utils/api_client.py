@@ -94,6 +94,7 @@ class APIClient:
     def admin_change_role(self, user_id: int, role: str):
         return self._call("PATCH", f"/admin/users/{user_id}/role", json={"role": role})
 
+
     # --- firms / matters / budgets ------------------------------------------
     def list_firms(self):
         return self._call("GET", "/firms")
@@ -110,42 +111,9 @@ class APIClient:
     def list_budgets(self):
         return self._call("GET", "/budgets")
 
-    def list_budget_summaries(self):
-        """
-        Canonical budget utilization for all accessible budgets.
-        """
-        return self._call(
-            "GET",
-            "/budgets/summary",
-        )
-
-
-    def get_budget_summary(self, budget_id: int):
-        """
-        Canonical utilization for one budget.
-        """
-        return self._call(
-            "GET",
-            f"/budgets/{budget_id}/summary",
-        )
-
     def create_budget(self, matter_id, allocated_amt, threshold_pct=80):
         return self._call("POST", "/budgets", json={
             "matter_id": matter_id, "allocated_amt": allocated_amt, "threshold_pct": threshold_pct})
-
-    def get_budget_hierarchy(self):
-        return self._call("GET", "/budgets/hierarchy")
-
-    def list_budget_adjustments(self, budget_id: int):
-        return self._call("GET", f"/budgets/{budget_id}/adjustments")
-
-    def adjust_budget(self, budget_id: int, adjustment_amount: float, reason: str, confirmed: bool, invoice_id: int | None = None):
-        return self._call("POST", f"/budgets/{budget_id}/adjustments", json={
-            "adjustment_amount": adjustment_amount,
-            "reason": reason,
-            "confirmed": confirmed,
-            "invoice_id": invoice_id,
-        })
 
     # --- invoices -------------------------------------------------------
     # Matter/firm are no longer supplied by the caller on submit — they're
@@ -187,6 +155,65 @@ class APIClient:
     def get_invoice(self, invoice_id: int):
         return self._call("GET", f"/invoices/{invoice_id}")
 
+
+    def get_invoice_document(self, invoice_id: int):
+        """
+        Downloads the original uploaded invoice document.
+
+        Returns:
+            tuple[bytes, str]
+            - file contents
+            - filename
+            """
+        try:
+            resp = requests.get(
+                f"{self.base_url}/invoices/{invoice_id}/document",
+                headers=self._headers(),
+                timeout=30,
+            )
+        except requests.exceptions.ConnectionError:
+            raise APIError(
+                0,
+                f"Can't reach the API at {self.base_url}. "
+                "Is the backend running?"
+            )
+
+        if resp.status_code == 401 and self.token:
+            _handle_session_expired()
+
+        if resp.status_code >= 400:
+            try:
+                payload = resp.json()
+            except Exception:
+                payload = {}
+
+            detail = payload.get(
+                "detail",
+                resp.text
+            )
+
+            raise APIError(
+                resp.status_code,
+                str(detail)
+            )
+
+        filename = "invoice.pdf"
+
+        content_disposition = resp.headers.get(
+            "Content-Disposition",
+            ""
+        )
+
+        if "filename=" in content_disposition:
+            filename = (
+                content_disposition
+                .split("filename=", 1)[1]
+                .strip()
+                .strip('"')
+            )
+
+        return resp.content, filename
+
     def list_invoices(self, matter_id=None, firm_id=None):
         params = {}
         if matter_id is not None:
@@ -194,8 +221,8 @@ class APIClient:
         if firm_id is not None:
             params["firm_id"] = firm_id
         return self._call("GET", "/invoices", params=params or None)
-    
-    
+
+
     def list_line_items(self, invoice_id=None):
         return self._call("GET", "/line-items", params={"invoice_id": invoice_id})
 
@@ -203,20 +230,26 @@ class APIClient:
     def list_budget_ledger(self, budget_id=None, invoice_id=None):
         return self._call("GET", "/budget-ledger", params={"budget_id": budget_id, "invoice_id": invoice_id})
 
-    def list_alerts(self, budget_id=None, active_only=True):
-        params = {}
+    def list_alerts(self, active_only: bool = False):
+        params = {"active_only": active_only} if active_only else {}
+        return self._call("GET", "/alerts", params=params)
 
-        if budget_id is not None:
-            params["budget_id"] = budget_id
+    def list_budget_summaries(self, **params):
+        return self._call("GET", "/budgets/summary", params=params)
 
-        if active_only is not None:
-            params["active_only"] = active_only
+    def get_budget_hierarchy(self, **params):
+        return self._call("GET", "/budgets/hierarchy", params=params)
 
-        return self._call(
-            "GET",
-            "/alerts",
-            params=params or None,
-        )
+    def list_budget_adjustments(self, budget_id: int):
+        return self._call("GET", f"/budgets/{budget_id}/adjustments")
+
+    def adjust_budget(self, budget_id: int, adjustment_amount: float, reason: str, confirmed: bool, invoice_id: int | None = None):
+        return self._call("POST", f"/budgets/{budget_id}/adjustments", json={
+            "adjustment_amount": adjustment_amount,
+            "reason": reason,
+            "confirmed": confirmed,
+            "invoice_id": invoice_id,
+        })
 
     # --- review workflow -----------------------------------------------------
     def review_queue(self):
@@ -234,32 +267,15 @@ class APIClient:
     def clarify(self, invoice_id, reason: str):
         return self._call("POST", f"/review/{invoice_id}/clarify", params={"reason": reason})
 
-    # --- validation ------------------------------------------------------------
-
-    def validate_invoice(
-        self,
-        invoice_id,
-        duplicate_flag=None,
-        confidence_score=None,
-    ):
-        """
-        Re-run validation.
-
-        Budget validity is never supplied by the frontend. The backend calculates
-        it from the canonical budget ledger.
-        """
-
+    def resolve_clarification(self, invoice_id, information: str):
         return self._call(
             "POST",
-            f"/validation/{invoice_id}",
+            f"/review/{invoice_id}/clarification-resolved",
             params={
-                "duplicate_flag": duplicate_flag,
-                "confidence_score": confidence_score,
+                "information": information,
             },
         )
-    # def validate_invoice(self, invoice_id, budget_valid=None, duplicate_flag=False, confidence_score=None):
-    #     return self._call("POST", f"/validation/{invoice_id}", params={
-    #         "budget_valid": budget_valid, "duplicate_flag": duplicate_flag, "confidence_score": confidence_score})
+
 
     # --- audit logs ---------------------------------------------------------------
     def list_audit_logs(self, invoice_id=None, user_id=None, filter: str | None = None, limit: int | None= None):
@@ -309,13 +325,11 @@ class APIClient:
         """
         Dismiss an alert without deleting its database record.
 
-        The backend sets is_active=False and records resolved_at.
-        """
+    # --- validation ------------------------------------------------------------
+    def validate_invoice(self, invoice_id, budget_valid=None, duplicate_flag=False, confidence_score=None):
+        return self._call("POST", f"/validation/{invoice_id}", params={
+            "budget_valid": budget_valid, "duplicate_flag": duplicate_flag, "confidence_score": confidence_score})
 
-        return self._call(
-            "PATCH",
-            f"/alerts/{alert_id}/dismiss",
-        )
 
 
 def get_client() -> APIClient:

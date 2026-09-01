@@ -16,7 +16,6 @@ router = APIRouter(
 @router.post("/{invoice_id}")
 def validate(
     invoice_id: int,
-    duplicate_flag: bool | None = Query(default=None),
     confidence_score: float | None = Query(
         default=None,
         ge=0.0,
@@ -52,11 +51,10 @@ def validate(
         )
 
     result = validate_and_route_invoice(
-        db=db,
-        invoice=invoice,
-        confidence_score=confidence_score,
-        duplicate_flag=duplicate_flag,
-    )
+    db=db,
+    invoice=invoice,
+    confidence_score=confidence_score,
+)
 
     return {
         "invoice_id": invoice.invoice_id,

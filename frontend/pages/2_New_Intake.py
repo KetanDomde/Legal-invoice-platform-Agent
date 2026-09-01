@@ -116,6 +116,13 @@ with st.container(border=True):
                         "inv_changes": None,
                     }
 
+                elif e.status_code == 500 and 'validation' in e.detail:
+                    st.session_state["_last_intake_error"] = {
+                        "label": f"API error {e.status_code}",
+                        "detail": "Invoice validation failed!",
+                        "inv_changes": None,
+                    }
+
                 else:
                     st.session_state["_last_intake_error"] = {
                         "label": f"API error {e.status_code}",

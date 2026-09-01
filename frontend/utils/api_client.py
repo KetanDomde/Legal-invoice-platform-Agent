@@ -94,6 +94,7 @@ class APIClient:
     def admin_change_role(self, user_id: int, role: str):
         return self._call("PATCH", f"/admin/users/{user_id}/role", json={"role": role})
 
+
     # --- firms / matters / budgets ------------------------------------------
     def list_firms(self):
         return self._call("GET", "/firms")
@@ -235,6 +236,20 @@ class APIClient:
 
     def list_budget_summaries(self, **params):
         return self._call("GET", "/budgets/summary", params=params)
+
+    def get_budget_hierarchy(self, **params):
+        return self._call("GET", "/budgets/hierarchy", params=params)
+
+    def list_budget_adjustments(self, budget_id: int):
+        return self._call("GET", f"/budgets/{budget_id}/adjustments")
+
+    def adjust_budget(self, budget_id: int, adjustment_amount: float, reason: str, confirmed: bool, invoice_id: int | None = None):
+        return self._call("POST", f"/budgets/{budget_id}/adjustments", json={
+            "adjustment_amount": adjustment_amount,
+            "reason": reason,
+            "confirmed": confirmed,
+            "invoice_id": invoice_id,
+        })
 
     # --- review workflow -----------------------------------------------------
     def review_queue(self):

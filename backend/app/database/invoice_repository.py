@@ -20,8 +20,28 @@ def _coerce_date(value):
     except ValueError: return None
 
 def _apply_line_items(db, invoice_id:int, line_items_data:list|None):
+    """Persist fee and expense lines without collapsing them into one shape."""
     for li in line_items_data or []:
-        db.add(LineItem(invoice_id=invoice_id,timekeeper=li.get("timekeeper"),hours=li.get("hours"),rate=li.get("rate"),amount=li.get("amount",0.0)))
+        explicit_type = str(li.get("line_type") or "").strip().lower()
+        has_timekeeper = bool(str(li.get("timekeeper") or "").strip())
+        has_hours = li.get("hours") is not None
+        has_rate = li.get("rate") is not None
+        if explicit_type == "expense":
+            line_type = "expense"
+        elif not has_timekeeper and not has_hours and not has_rate:
+            line_type = "expense"
+        else:
+            line_type = "fee"
+        db.add(LineItem(
+            invoice_id=invoice_id,
+            line_type=line_type,
+            timekeeper=li.get("timekeeper"),
+            role=li.get("role"),
+            description=li.get("description"),
+            hours=li.get("hours"),
+            rate=li.get("rate"),
+            amount=li.get("amount",0.0),
+        ))
 
 def get_or_create_matter(db, matter_no:str, matter_name:str|None=None, firm_name:str|None=None, firm_address:str|None=None):
     """Compatibility wrapper used by the graph. Matter ID is authoritative within a firm."""

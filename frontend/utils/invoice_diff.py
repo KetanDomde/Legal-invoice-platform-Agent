@@ -34,9 +34,22 @@ def _diff_table(changes: dict) -> pd.DataFrame:
 
 
 def _line_item_summary(item: dict) -> str:
+    line_type = item.get("line_type") or (
+        "expense" if not item.get("timekeeper") else "fee"
+    )
+
+    if line_type == "expense":
+        return (
+            f'{item.get("description") or "Expense"} '
+            f'= {money(item.get("amount"))}'
+        )
+
     return (
-        f'{item.get("timekeeper") or "—"}, '
-        f'{item.get("hours") or 0} hrs @ {money(item.get("rate"))} = {money(item.get("amount"))}'
+        f'{item.get("timekeeper") or "—"}'
+        f' ({item.get("role") or "—"}), '
+        f'{item.get("hours") or 0} hrs @ '
+        f'{money(item.get("rate"))} = '
+        f'{money(item.get("amount"))}'
     )
 
 

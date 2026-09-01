@@ -105,6 +105,12 @@ def extract_invoice_fields(raw_text: str) -> tuple[dict, float]:
                 matter_id, or line_item_id.
                 7. Do not omit line items.
                 8. Convert all date to 'yyyy-mm-dd' format.
+                9. Classify each charge line with line_type: use "fee" for
+                   timekeeper/professional-service charges and "expense" for
+                   disbursements such as filing fees, courier, travel, copies,
+                   taxes, or other non-timekeeper charges.
+                10. For expense rows, put the expense label in description and
+                    leave timekeeper, hours, and rate null when they do not apply.
                 """
                 ),
             },
@@ -131,6 +137,18 @@ def validate_relationships(db: Session, matter_id: int, firm_id: int) -> tuple[M
         raise ValueError("Matter does not belong to the supplied firm.")
     return matter, firm
 
+
+
+def _classify_line_type(item):
+    explicit_type = str(getattr(item, "line_type", None) or "").strip().lower()
+    has_timekeeper = bool(str(getattr(item, "timekeeper", None) or "").strip())
+    has_hours = getattr(item, "hours", None) is not None
+    has_rate = getattr(item, "rate", None) is not None
+    if explicit_type == "expense":
+        return "expense"
+    if not has_timekeeper and not has_hours and not has_rate:
+        return "expense"
+    return "fee"
 
 def persist_extracted_invoice(
     state
@@ -164,7 +182,10 @@ def persist_extracted_invoice(
         # 3. Replace the relationship list
         duplicate.line_items = [
             LineItem(
+                line_type=_classify_line_type(item),
                 timekeeper=item.timekeeper,
+                role=getattr(item, "role", None),
+                description=getattr(item, "description", None),
                 hours=item.hours,
                 rate=item.rate,
                 amount=item.amount,
@@ -191,7 +212,10 @@ def persist_extracted_invoice(
         )
         invoice.line_items = [
             LineItem(
+                line_type=_classify_line_type(item),
                 timekeeper=item.timekeeper,
+                role=getattr(item, "role", None),
+                description=getattr(item, "description", None),
                 hours=item.hours,
                 rate=item.rate,
                 amount=item.amount,

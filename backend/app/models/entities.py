@@ -91,7 +91,11 @@ class LineItem(Base):
     __tablename__ = "line_items"
     line_item_id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     invoice_id: Mapped[int] = mapped_column(ForeignKey("invoices.invoice_id"), nullable=False, index=True)
+    # fee = timekeeper professional charge; expense = flat reimbursable cost.
+    line_type: Mapped[str] = mapped_column(String(20), nullable=False, default="fee", index=True)
     timekeeper: Mapped[Optional[str]] = mapped_column(String(255))
+    role: Mapped[Optional[str]] = mapped_column(String(255))
+    description: Mapped[Optional[str]] = mapped_column(Text)
     hours: Mapped[Optional[float]] = mapped_column(Float)
     rate: Mapped[Optional[float]] = mapped_column(Float)
     amount: Mapped[float] = mapped_column(Numeric(14,2), nullable=False)

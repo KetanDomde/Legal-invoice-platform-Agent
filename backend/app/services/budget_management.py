@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import uuid
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
@@ -28,25 +27,11 @@ def normalize(value: str | None) -> str:
     return " ".join((value or "").strip().casefold().split())
 
 
-def _request_id() -> str:
-    """Return a real trace id for every audit event.
-
-    The normal FastAPI middleware supplies the request id.  The UUID fallback is
-    intentionally here as a safety net for service calls made outside a normal
-    HTTP request (tests, scripts, background jobs).
-    """
+def _request_id() -> str | None:
     try:
-        value = request_id_ctx.get()
+        return request_id_ctx.get()
     except Exception:
-        value = None
-
-    if not value or str(value).strip().lower() in {"n/a", "none", "null"}:
-        value = str(uuid.uuid4())
-        try:
-            request_id_ctx.set(value)
-        except Exception:
-            pass
-    return str(value)
+        return None
 
 
 def _audit(
@@ -212,22 +197,12 @@ def _intake_status(allocated: float, projected: float, threshold_pct: float) -> 
     return "within_budget"
 
 
-def _budget_alert_message(invoice: Invoice, budget: Budget, status: str, remaining: float, pct: float) -> str:
-    """Build a human-readable, actionable alert with firm, matter and invoice identity."""
-    firm_name = invoice.firm.name if getattr(invoice, "firm", None) else f"Firm #{invoice.firm_id}"
-    matter_no = invoice.matter.matter_no if getattr(invoice, "matter", None) else str(invoice.matter_id)
-    matter_name = invoice.matter.name if getattr(invoice, "matter", None) else "Unknown matter"
-    invoice_no = invoice.invoice_no or f"#{invoice.invoice_id}"
-    prefix = f"Firm: {firm_name} | Matter: {matter_no} — {matter_name} | Invoice: {invoice_no}."
-    if status == "over_budget":
-        return f"{prefix} Invoice exceeds the available budget by ${abs(remaining):,.2f}. Projected utilization: {pct:.1f}%."
-    return f"{prefix} Invoice reaches the configured budget threshold. Projected utilization: {pct:.1f}% (threshold {float(budget.threshold_pct):.1f}%)."
-
-
 def apply_intake_snapshot(db: Session, invoice: Invoice, budget: Budget, user_id: int = -1):
-    """Persist immutable intake numbers and create invoice-specific budget alerts.
+    """Persist immutable intake numbers and create invoice-specific alerts.
 
-    Threshold is informational only. Over-budget is the only budget blocker.
+    A threshold warning is informational; only an actual over-budget condition is
+    a budget blocker. This prevents threshold-only invoices from being forced to
+    human review.
     """
     used = budget_usage(db, budget)
     allocated = float(budget.allocated_amt)
@@ -249,24 +224,42 @@ def apply_intake_snapshot(db: Session, invoice: Invoice, budget: Budget, user_id
 
     if status != "within_budget":
         alert_type = "OVER_BUDGET_DETECTED" if status == "over_budget" else "BUDGET_THRESHOLD_REACHED"
-        message = _budget_alert_message(invoice, budget, status, remaining, pct)
-        existing = (
-            db.query(Alert)
-            .filter(
-                Alert.budget_id == budget.budget_id,
-                Alert.invoice_id == invoice.invoice_id,
-                Alert.type == alert_type,
-                Alert.is_active.is_(True),
+        message = (
+            f"Invoice {invoice.invoice_no or invoice.invoice_id} would exceed budget by ${abs(remaining):,.2f}."
+            if status == "over_budget"
+            else (
+                f"Invoice {invoice.invoice_no or invoice.invoice_id} would take budget utilization "
+                f"to {pct:.1f}% (threshold {float(budget.threshold_pct):.1f}%)."
             )
-            .first()
         )
-        if existing is None:
-            db.add(Alert(budget_id=budget.budget_id, invoice_id=invoice.invoice_id, type=alert_type, message=message, is_active=True))
-            _audit(db, alert_type, user_id=user_id, invoice_id=invoice.invoice_id, firm_id=invoice.firm_id, matter_id=invoice.matter_id, budget_id=budget.budget_id, notes=message)
+        db.add(
+            Alert(
+                budget_id=budget.budget_id,
+                invoice_id=invoice.invoice_id,
+                type=alert_type,
+                message=message,
+                is_active=True,
+            )
+        )
+        _audit(
+            db,
+            alert_type,
+            user_id=user_id,
+            invoice_id=invoice.invoice_id,
+            firm_id=invoice.firm_id,
+            matter_id=invoice.matter_id,
+            budget_id=budget.budget_id,
+            notes=message,
+        )
 
     _audit(
-        db, "INVOICE_ASSOCIATED_WITH_MATTER", user_id=user_id, invoice_id=invoice.invoice_id,
-        firm_id=invoice.firm_id, matter_id=invoice.matter_id, budget_id=budget.budget_id,
+        db,
+        "INVOICE_ASSOCIATED_WITH_MATTER",
+        user_id=user_id,
+        invoice_id=invoice.invoice_id,
+        firm_id=invoice.firm_id,
+        matter_id=invoice.matter_id,
+        budget_id=budget.budget_id,
         notes=f"Invoice associated with matter {invoice.matter.matter_no if invoice.matter else invoice.matter_id}.",
     )
     return status
@@ -290,7 +283,13 @@ def _deactivate_alerts_for_invoice(db: Session, invoice_id: int, types: tuple[st
 
 
 def _current_invoice_budget_result(db: Session, invoice: Invoice, budget: Budget) -> dict:
-    used = budget_usage(db, budget)
+    """Return the budget result for one invoice using the correct time context.
+
+    Pending invoices are projected against the current approved spend because
+    they have not been posted to the ledger yet. Approved invoices use their
+    immutable intake snapshot when available, so older rows do not all change
+    to the latest budget position after a later adjustment.
+    """
     existing_post = (
         db.query(BudgetLedger)
         .filter(
@@ -300,8 +299,46 @@ def _current_invoice_budget_result(db: Session, invoice: Invoice, budget: Budget
         )
         .first()
     )
-    projected = used if existing_post else used + float(invoice.total_amount or 0)
+
     allocated = float(budget.allocated_amt or 0)
+
+    # A pending invoice is a projection against today's approved spend.
+    if invoice.status == "pending_review" and existing_post is None:
+        used = budget_usage(db, budget)
+        projected = used + float(invoice.total_amount or 0)
+        remaining = allocated - projected
+        pct = (projected / allocated * 100) if allocated else 0.0
+        status = _intake_status(allocated, projected, float(budget.threshold_pct or 0))
+        return {
+            "budget_result": status,
+            "remaining_after_invoice": remaining,
+            "projected_utilization": pct,
+            "needs_attention": status == "over_budget",
+        }
+
+    # Approved invoices should retain their historical intake result.
+    if existing_post is not None and invoice.budget_status_at_intake:
+        pct = (
+            float(invoice.budget_projected_pct)
+            if invoice.budget_projected_pct is not None
+            else 0.0
+        )
+        remaining = (
+            float(invoice.budget_remaining_after_invoice)
+            if invoice.budget_remaining_after_invoice is not None
+            else allocated - float(invoice.budget_projected_after_invoice or 0)
+        )
+        status = invoice.budget_status_at_intake
+        return {
+            "budget_result": status,
+            "remaining_after_invoice": remaining,
+            "projected_utilization": pct,
+            "needs_attention": status == "over_budget",
+        }
+
+    # Backward-compatible fallback for older invoices without snapshots.
+    used = budget_usage(db, budget)
+    projected = used if existing_post else used + float(invoice.total_amount or 0)
     remaining = allocated - projected
     pct = (projected / allocated * 100) if allocated else 0.0
     status = _intake_status(allocated, projected, float(budget.threshold_pct or 0))
@@ -313,89 +350,330 @@ def _current_invoice_budget_result(db: Session, invoice: Invoice, budget: Budget
     }
 
 
-def reconcile_budget_after_adjustment(db: Session, *, budget: Budget, user: User) -> dict:
-    """Reconcile pending invoices after a budget adjustment.
+def _ensure_current_budget_alert(
+    db: Session,
+    *,
+    budget: Budget,
+    matter: Matter,
+    alert_type: str,
+    invoice_id: int | None = None,
+    message: str,
+    user_id: int = -1,
+) -> bool:
+    """Ensure the current budget state has one active alert of ``alert_type``.
 
-    If the budget was the reason an invoice was pending and the invoice now passes
-    validation, approve it automatically. Other validation failures remain pending
-    and their exact reasons are preserved for the admin UI.
+    Budget alerts are state-based, not only intake-event-based.  A budget
+    adjustment can change an invoice from over-budget to threshold-only (or
+    leave the matter over budget), so reconciliation must restore the current
+    alert after resolving stale invoice-specific alerts.
     """
+    existing = (
+        db.query(Alert)
+        .filter(
+            Alert.budget_id == budget.budget_id,
+            Alert.type == alert_type,
+            Alert.is_active.is_(True),
+        )
+        .order_by(Alert.alert_id.desc())
+        .first()
+    )
+
+    if existing is not None:
+        existing.message = message
+        # The alert represents the current state. Clear stale invoice links when
+        # there is no current pending invoice, and replace them when there is one.
+        existing.invoice_id = invoice_id
+        return False
+
+    alert = Alert(
+        budget_id=budget.budget_id,
+        invoice_id=invoice_id,
+        type=alert_type,
+        message=message,
+        is_active=True,
+    )
+    db.add(alert)
+    db.flush()
+
+    _audit(
+        db,
+        alert_type,
+        user_id=user_id,
+        invoice_id=invoice_id,
+        firm_id=matter.firm_id,
+        matter_id=matter.matter_id,
+        budget_id=budget.budget_id,
+        notes=message,
+    )
+    return True
+
+
+def _deactivate_budget_alert_type(db: Session, budget_id: int, alert_type: str) -> int:
+    """Deactivate all active alerts of one type for a budget."""
+    rows = (
+        db.query(Alert)
+        .filter(
+            Alert.budget_id == budget_id,
+            Alert.type == alert_type,
+            Alert.is_active.is_(True),
+        )
+        .all()
+    )
+    now = datetime.now(timezone.utc)
+    for row in rows:
+        row.is_active = False
+        row.resolved_at = now
+    return len(rows)
+
+
+def _sync_budget_state_alert(db: Session, *, budget: Budget, matter: Matter, user_id: int) -> tuple[int, int]:
+    """Synchronize the single canonical active alert for a budget.
+
+    Rules:
+      1. A pending invoice is projected against current approved spend.
+      2. If that projection exceeds 100%, the active alert is OVER_BUDGET_DETECTED.
+      3. Otherwise, if current/projection utilization is >= threshold, the active
+         alert is BUDGET_THRESHOLD_REACHED.
+      4. Below threshold, no budget alert remains active.
+
+    This is the source of truth used by Home, Matter & Budget, and Budgets &
+    Alerts. It deliberately does not change the approved ledger merely because
+    an invoice is pending.
+    """
+    used = budget_usage(db, budget)
+    allocated = float(budget.allocated_amt or 0)
+    threshold = float(budget.threshold_pct or 0)
+
+    # Prefer the newest pending invoice because it is the current unresolved
+    # budget decision the user needs to see. If none is pending, use the latest
+    # approved ledger invoice only as the contextual invoice reference.
+    pending_invoice = (
+        db.query(Invoice)
+        .filter(
+            Invoice.matter_id == budget.matter_id,
+            Invoice.status == "pending_review",
+        )
+        .order_by(Invoice.invoice_id.desc())
+        .first()
+    )
+
+    if pending_invoice is not None:
+        invoice_id = pending_invoice.invoice_id
+        projected = used + float(pending_invoice.total_amount or 0)
+        projected_pct = (projected / allocated * 100) if allocated > 0 else 0.0
+        projected_remaining = allocated - projected
+    else:
+        invoice_id = (
+            db.query(BudgetLedger.invoice_id)
+            .filter(
+                BudgetLedger.budget_id == budget.budget_id,
+                BudgetLedger.entry_type == APPROVED_ENTRY_TYPE,
+                BudgetLedger.invoice_id.isnot(None),
+            )
+            .order_by(BudgetLedger.ledger_id.desc())
+            .first()
+        )
+        invoice_id = invoice_id[0] if invoice_id else None
+        projected = used
+        projected_pct = (used / allocated * 100) if allocated > 0 else 0.0
+        projected_remaining = allocated - used
+
+    created = 0
+    resolved = 0
+
+    if projected > allocated:
+        if pending_invoice is not None:
+            message = (
+                f"Firm: {matter.firm.name if matter.firm else '—'} | "
+                f"Matter: {matter.matter_no or '—'} — {matter.name} | "
+                f"Invoice: {pending_invoice.invoice_no or f'#{pending_invoice.invoice_id}'}. "
+                f"Invoice is pending review and would exceed the available budget "
+                f"by ${abs(projected_remaining):,.2f}. "
+                f"Projected spend is ${projected:,.2f} against ${allocated:,.2f}; "
+                f"projected utilization is {projected_pct:.1f}%."
+            )
+        else:
+            message = (
+                f"Firm: {matter.firm.name if matter.firm else '—'} | "
+                f"Matter: {matter.matter_no or '—'} — {matter.name}. "
+                f"Budget is over the effective limit. Approved spend is "
+                f"${used:,.2f} against ${allocated:,.2f}; utilization is {projected_pct:.1f}%."
+            )
+
+        created += int(
+            _ensure_current_budget_alert(
+                db,
+                budget=budget,
+                matter=matter,
+                alert_type="OVER_BUDGET_DETECTED",
+                invoice_id=invoice_id,
+                message=message,
+                user_id=user_id,
+            )
+        )
+        resolved += _deactivate_budget_alert_type(db, budget.budget_id, "BUDGET_THRESHOLD_REACHED")
+        resolved += _deactivate_budget_alert_type(db, budget.budget_id, "budget_threshold")
+        resolved += _deactivate_budget_alert_type(db, budget.budget_id, "budget_overrun")
+
+    elif projected_pct >= threshold:
+        if pending_invoice is not None:
+            message = (
+                f"Firm: {matter.firm.name if matter.firm else '—'} | "
+                f"Matter: {matter.matter_no or '—'} — {matter.name} | "
+                f"Invoice: {pending_invoice.invoice_no or f'#{pending_invoice.invoice_id}'}. "
+                f"Invoice is pending review and would take budget utilization to "
+                f"{projected_pct:.1f}% (threshold {threshold:.1f}%)."
+            )
+        else:
+            message = (
+                f"Firm: {matter.firm.name if matter.firm else '—'} | "
+                f"Matter: {matter.matter_no or '—'} — {matter.name}. "
+                f"Budget threshold reached. Current utilization is {projected_pct:.1f}% "
+                f"(threshold {threshold:.1f}%)."
+            )
+
+        created += int(
+            _ensure_current_budget_alert(
+                db,
+                budget=budget,
+                matter=matter,
+                alert_type="BUDGET_THRESHOLD_REACHED",
+                invoice_id=invoice_id,
+                message=message,
+                user_id=user_id,
+            )
+        )
+        resolved += _deactivate_budget_alert_type(db, budget.budget_id, "OVER_BUDGET_DETECTED")
+        resolved += _deactivate_budget_alert_type(db, budget.budget_id, "budget_overrun")
+        resolved += _deactivate_budget_alert_type(db, budget.budget_id, "budget_threshold")
+    else:
+        for alert_type in (
+            "OVER_BUDGET_DETECTED",
+            "budget_overrun",
+            "BUDGET_THRESHOLD_REACHED",
+            "budget_threshold",
+        ):
+            resolved += _deactivate_budget_alert_type(db, budget.budget_id, alert_type)
+
+    return created, resolved
+
+
+def reconcile_budget_after_adjustment(db: Session, *, budget: Budget, user: User) -> dict:
+    """Re-evaluate pending invoices after an admin changes a budget.
+
+    Only invoices whose budget blocker disappeared are candidates for automatic
+    approval. The normal validation function is reused, so low confidence,
+    duplicate, and other validation blockers still keep the invoice pending.
+    """
+    matter = db.get(Matter, budget.matter_id)
     pending = (
         db.query(Invoice)
-        .filter(Invoice.matter_id == budget.matter_id, Invoice.status == "pending_review")
+        .filter(
+            Invoice.matter_id == budget.matter_id,
+            Invoice.status == "pending_review",
+        )
         .order_by(Invoice.invoice_id.asc())
         .all()
     )
-    auto_approved, still_pending = [], []
+
+    auto_approved: list[dict] = []
+    still_pending: list[dict] = []
     resolved_alerts = 0
 
+    # Imported lazily to avoid service import cycles.
     from app.services.invoice import validate_invoice, add_audit_log
     from app.workflow.approval_service import auto_approve_invoice
 
     for invoice in pending:
         before_budget_blocker = bool(invoice.budget_attention_required)
         result = validate_invoice(db=db, invoice=invoice)
-        reasons = [r for r in (result.get("reasons") or []) if r]
 
-        invoice.confidence_score = result.get("confidence_score", invoice.confidence_score)
-        invoice.budget_valid = bool(result.get("budget_ok"))
-        invoice.duplicate_flag = bool(result.get("duplicate"))
-        invoice.validation_status = "passed" if result.get("validation_passed") else "failed"
-        invoice.validation_message = "; ".join(reasons)
-        invoice.budget_attention_required = not bool(result.get("budget_ok"))
+        invoice.confidence_score = result["confidence_score"]
+        invoice.budget_valid = result["budget_ok"]
+        invoice.duplicate_flag = result["duplicate"]
+        invoice.validation_status = "passed" if result["validation_passed"] else "failed"
+        invoice.validation_message = "; ".join(result["reasons"])
+        invoice.budget_attention_required = not result["budget_ok"]
 
-        # A budget adjustment resolves old invoice-specific budget alerts. Threshold
-        # warnings are historical snapshots, not unresolved blockers, so do not keep
-        # stale alerts after reconciliation.
-        if result.get("budget_ok"):
+        if result["budget_ok"]:
             resolved_alerts += _deactivate_alerts_for_invoice(
-                db, invoice.invoice_id,
-                ("OVER_BUDGET_DETECTED", "budget_overrun", "BUDGET_THRESHOLD_REACHED", "budget_threshold"),
+                db,
+                invoice.invoice_id,
+                ("OVER_BUDGET_DETECTED", "budget_overrun"),
             )
+            current = _current_invoice_budget_result(db, invoice, budget)
+            if current["budget_result"] == "within_budget":
+                resolved_alerts += _deactivate_alerts_for_invoice(
+                    db,
+                    invoice.invoice_id,
+                    ("BUDGET_THRESHOLD_REACHED", "budget_threshold"),
+                )
 
-        # Do not depend on result['decision'] here. Reconciliation is after a budget
-        # change; validation_passed is the authoritative answer to whether any other
-        # blocker remains.
-        budget_was_only_blocker = before_budget_blocker and bool(result.get("validation_passed")) and bool(result.get("budget_ok"))
-        if budget_was_only_blocker:
+        if result["decision"] == "auto_approved" and before_budget_blocker:
             old_status = invoice.status
             invoice.status = "submitted"
             db.flush()
             auto_approve_invoice(db=db, invoice=invoice)
-            auto_approved.append({
-                "invoice_id": invoice.invoice_id,
-                "invoice_no": invoice.invoice_no,
-                "reason": "Budget was the only blocker; after the adjustment all validation checks pass.",
-            })
+            auto_approved.append(
+                {
+                    "invoice_id": invoice.invoice_id,
+                    "invoice_no": invoice.invoice_no,
+                    "reason": "Budget was the only remaining blocker and the invoice now passes validation.",
+                }
+            )
             _audit(
-                db, "BUDGET_BLOCKER_RESOLVED_AUTO_APPROVED", user_id=user.user_id,
-                invoice_id=invoice.invoice_id, firm_id=invoice.firm_id, matter_id=invoice.matter_id,
+                db,
+                "BUDGET_BLOCKER_RESOLVED_AUTO_APPROVED",
+                user_id=user.user_id,
+                invoice_id=invoice.invoice_id,
+                firm_id=invoice.firm_id,
+                matter_id=invoice.matter_id,
                 budget_id=budget.budget_id,
-                notes=f"Budget adjustment removed the only blocker. Invoice changed from '{old_status}' to approved automatically.",
+                notes=(
+                    f"Budget adjustment removed the budget blocker. Invoice changed from "
+                    f"'{old_status}' to approved automatically."
+                ),
             )
         else:
             invoice.status = "pending_review"
-            if result.get("budget_ok") and not before_budget_blocker:
-                pending_reason = "Invoice remains pending because of non-budget validation issues. " + "; ".join(reasons)
-            elif result.get("budget_ok"):
-                pending_reason = "Budget is resolved, but non-budget validation issues remain. " + "; ".join(reasons)
-            else:
-                pending_reason = "Budget issue still remains. " + "; ".join(reasons)
-            still_pending.append({"invoice_id": invoice.invoice_id, "invoice_no": invoice.invoice_no, "reasons": reasons})
-            add_audit_log(db=db, action="budget_reconciled_pending_review", user_id=user.user_id, invoice_id=invoice.invoice_id, notes=pending_reason)
-
-    # Resolve stale budget alerts for every invoice in this matter after the new budget
-    # is effective. Current utilization remains visible in the UI as a warning.
-    all_matter_invoices = db.query(Invoice).filter(Invoice.matter_id == budget.matter_id).all()
-    for invoice in all_matter_invoices:
-        current = _current_invoice_budget_result(db, invoice, budget)
-        if not current["needs_attention"]:
-            resolved_alerts += _deactivate_alerts_for_invoice(
-                db, invoice.invoice_id,
-                ("OVER_BUDGET_DETECTED", "budget_overrun", "BUDGET_THRESHOLD_REACHED", "budget_threshold"),
+            still_pending.append(
+                {
+                    "invoice_id": invoice.invoice_id,
+                    "invoice_no": invoice.invoice_no,
+                    "reasons": result["reasons"],
+                }
+            )
+            add_audit_log(
+                db=db,
+                action="budget_reconciled_pending_review",
+                user_id=user.user_id,
+                invoice_id=invoice.invoice_id,
+                notes=(
+                    "Budget changed, but invoice remains pending review. "
+                    + "; ".join(result["reasons"])
+                ),
             )
 
-    return {"auto_approved": auto_approved, "still_pending": still_pending, "resolved_alerts": resolved_alerts}
+    # Reconcile the final ledger-backed budget state.
+    #
+    # IMPORTANT: resolving the invoice's old budget blocker must NOT mean that
+    # all alerts disappear.  If the new budget is still at/above the configured
+    # threshold, a threshold warning must remain active; if it is still above
+    # 100%, an over-budget alert must remain active.
+    created_alerts, state_resolved_alerts = _sync_budget_state_alert(
+        db,
+        budget=budget,
+        matter=matter,
+        user_id=user.user_id,
+    )
+    resolved_alerts += state_resolved_alerts
+
+    return {
+        "auto_approved": auto_approved,
+        "still_pending": still_pending,
+        "resolved_alerts": resolved_alerts,
+        "created_alerts": created_alerts,
+    }
 
 
 def adjust_budget(
@@ -449,33 +727,27 @@ def adjust_budget(
         new_value=f"{new:.2f}",
         reason=reason.strip(),
         confirmed=True,
-        notes=(
-            f"Budget adjustment confirmed by admin for "
-            f"{matter.matter_no if matter and getattr(matter, 'matter_no', None) else 'the selected matter'}"
-            + (
-                f"; related invoice {db.get(Invoice, invoice_id).invoice_no or invoice_id}."
-                if invoice_id is not None and db.get(Invoice, invoice_id) is not None
-                else "; no specific invoice was selected."
-            )
-        ),
+        notes="Budget adjustment confirmed by admin.",
     )
     return adjustment
 
+
 def budget_hierarchy(db: Session, firm_id: int | None = None):
     """
-    Return the Budgets & Alerts hierarchy.
+    Return the Firm -> Matter -> Budget -> Invoice hierarchy used by
+    Home, Matter & Budget, and Budgets & Alerts.
 
-    A firm can be automatically expanded by the frontend when it contains:
+    Budget semantics:
+    - `utilized`, `remaining`, and `pct_used` represent the CURRENT
+      approved ledger-backed spend.
+    - `projected_*` fields include the newest pending-review invoice,
+      when one exists.
+    - The approved BudgetLedger is never modified merely because an
+      invoice is pending review.
 
-    1. The newest invoice in the accessible data.
-    2. A matter currently over budget.
-    3. A matter currently at or above its configured threshold.
-    4. One or more active alerts.
-
-    Invoice IDs are used to identify the newest invoice because the current
-    Invoice model does not have a created_at column.
+    This keeps approved financial utilization separate from projected
+    utilization while exposing both values to the UI.
     """
-
     q = (
         db.query(Firm)
         .options(
@@ -488,25 +760,24 @@ def budget_hierarchy(db: Session, firm_id: int | None = None):
     if firm_id is not None:
         q = q.filter(Firm.firm_id == firm_id)
 
+    # Synchronize persisted budget alerts before returning the hierarchy.
+    # This ensures that a pending invoice which exceeds the budget has
+    # an active budget alert.
     firms = q.all()
-
-    # -----------------------------------------------------------------------
-    # Determine the newest accessible invoice.
-    #
-    # The current Invoice entity has no created_at column, therefore the
-    # highest auto-increment invoice_id is the reliable "most recently added"
-    # indicator available without changing the database schema.
-    # -----------------------------------------------------------------------
-    newest_invoice_id = None
 
     for firm in firms:
         for matter in firm.matters:
-            for invoice in matter.invoices:
-                if (
-                    newest_invoice_id is None
-                    or invoice.invoice_id > newest_invoice_id
-                ):
-                    newest_invoice_id = invoice.invoice_id
+            if not matter.budget:
+                continue
+
+            _sync_budget_state_alert(
+                db,
+                budget=matter.budget,
+                matter=matter,
+                user_id=-1,
+            )
+
+    db.commit()
 
     result = []
 
@@ -518,19 +789,98 @@ def budget_hierarchy(db: Session, firm_id: int | None = None):
                 continue
 
             budget = matter.budget
+
+            # ---------------------------------------------------------
+            # Current approved budget state
+            # ---------------------------------------------------------
             used = budget_usage(db, budget)
             allocated = float(budget.allocated_amt or 0)
+            threshold_pct = float(budget.threshold_pct or 0)
 
             pct = (
-                used / allocated * 100
+                (used / allocated) * 100
                 if allocated > 0
                 else 0.0
             )
 
-            threshold_pct = float(
-                budget.threshold_pct or 0
+            remaining = allocated - used
+
+            # ---------------------------------------------------------
+            # Pending-review projection
+            # ---------------------------------------------------------
+            #
+            # Only the newest pending invoice is projected here.
+            # This matches _sync_budget_state_alert(), which treats the
+            # newest unresolved invoice as the current budget decision.
+            #
+            pending_invoice = (
+                db.query(Invoice)
+                .filter(
+                    Invoice.matter_id == matter.matter_id,
+                    Invoice.status == "pending_review",
+                )
+                .order_by(Invoice.invoice_id.desc())
+                .first()
             )
 
+            if pending_invoice is not None:
+                pending_amount = float(
+                    pending_invoice.total_amount or 0
+                )
+
+                projected_used = used + pending_amount
+
+                projected_pct = (
+                    (projected_used / allocated) * 100
+                    if allocated > 0
+                    else 0.0
+                )
+
+                projected_remaining = (
+                    allocated - projected_used
+                )
+
+                projected_status = _intake_status(
+                    allocated,
+                    projected_used,
+                    threshold_pct,
+                )
+
+                projected_threshold_reached = (
+                    projected_pct >= threshold_pct
+                )
+
+                projected_over_budget = (
+                    projected_used > allocated
+                )
+
+                pending_invoice_id = pending_invoice.invoice_id
+            else:
+                # No pending invoice means current and projected
+                # utilization are identical.
+                projected_used = used
+                projected_pct = pct
+                projected_remaining = remaining
+
+                projected_status = _intake_status(
+                    allocated,
+                    projected_used,
+                    threshold_pct,
+                )
+
+                projected_threshold_reached = (
+                    projected_pct >= threshold_pct
+                )
+
+                projected_over_budget = (
+                    projected_used > allocated
+                )
+
+                pending_invoice_id = None
+
+            # ---------------------------------------------------------
+            # Invoice details
+            # ---------------------------------------------------------
             invoices = []
 
             for invoice in sorted(
@@ -548,24 +898,22 @@ def budget_hierarchy(db: Session, firm_id: int | None = None):
                     {
                         "invoice_id": invoice.invoice_id,
                         "invoice_no": invoice.invoice_no,
-                        "amount": float(
-                            invoice.total_amount or 0
-                        ),
+                        "amount": float(invoice.total_amount or 0),
                         "status": invoice.status,
 
-                        "budget_result": current[
-                            "budget_result"
-                        ],
-                        "remaining_after_invoice": current[
-                            "remaining_after_invoice"
-                        ],
-                        "projected_utilization": current.get(
-                            "projected_utilization"
+                        # Current invoice-specific budget decision
+                        "budget_result": current["budget_result"],
+                        "remaining_after_invoice": (
+                            current["remaining_after_invoice"]
                         ),
-                        "needs_attention": current[
-                            "needs_attention"
-                        ],
+                        "projected_utilization": (
+                            current["projected_utilization"]
+                        ),
+                        "needs_attention": (
+                            current["needs_attention"]
+                        ),
 
+                        # Immutable intake snapshot
                         "intake_budget_result": (
                             invoice.budget_status_at_intake
                         ),
@@ -578,19 +926,45 @@ def budget_hierarchy(db: Session, firm_id: int | None = None):
                             else None
                         ),
 
-                        "validation_message": (
-                            invoice.validation_message
+                        "intake_projected_utilization": (
+                            float(invoice.budget_projected_pct)
+                            if invoice.budget_projected_pct
+                            is not None
+                            else None
                         ),
 
-                        # True only for the newest invoice in the currently
-                        # accessible dataset.
-                        "is_newest_invoice": (
-                            invoice.invoice_id
-                            == newest_invoice_id
+                        "intake_budget_amount": (
+                            float(invoice.budget_amount_at_intake)
+                            if invoice.budget_amount_at_intake
+                            is not None
+                            else None
+                        ),
+
+                        "intake_used_before_invoice": (
+                            float(invoice.budget_used_before_invoice)
+                            if invoice.budget_used_before_invoice
+                            is not None
+                            else None
+                        ),
+
+                        "intake_projected_after_invoice": (
+                            float(
+                                invoice.budget_projected_after_invoice
+                            )
+                            if invoice.budget_projected_after_invoice
+                            is not None
+                            else None
+                        ),
+
+                        "validation_message": (
+                            invoice.validation_message
                         ),
                     }
                 )
 
+            # ---------------------------------------------------------
+            # Active alerts
+            # ---------------------------------------------------------
             active_alert_count = (
                 db.query(Alert)
                 .filter(
@@ -600,14 +974,9 @@ def budget_hierarchy(db: Session, firm_id: int | None = None):
                 .count()
             )
 
-            threshold_reached = (
-                pct >= threshold_pct
-            )
-
-            over_budget = (
-                used > allocated
-            )
-
+            # ---------------------------------------------------------
+            # Matter-level budget response
+            # ---------------------------------------------------------
             matters.append(
                 {
                     "matter_id": matter.matter_id,
@@ -616,50 +985,152 @@ def budget_hierarchy(db: Session, firm_id: int | None = None):
 
                     "budget_id": budget.budget_id,
 
+                    # Current / approved ledger state
                     "allocated": allocated,
                     "utilized": used,
-                    "remaining": allocated - used,
+                    "remaining": remaining,
                     "pct_used": pct,
 
+                    # Existing threshold information
                     "threshold_pct": threshold_pct,
-                    "threshold_reached": threshold_reached,
-                    "over_budget": over_budget,
+                    "threshold_reached": (
+                        pct >= threshold_pct
+                    ),
+                    "over_budget": (
+                        pct > 100
+                    ),
+
+                    # -------------------------------------------------
+                    # NEW: projected state including pending invoice
+                    # -------------------------------------------------
+                    "projected_utilized": projected_used,
+                    "projected_remaining": projected_remaining,
+                    "projected_pct_used": projected_pct,
+                    "projected_threshold_reached": (
+                        projected_threshold_reached
+                    ),
+                    "projected_over_budget": (
+                        projected_over_budget
+                    ),
+                    "projected_status": projected_status,
+
+                    # Helpful context for the UI
+                    "pending_invoice_id": pending_invoice_id,
+                    "pending_invoice_amount": (
+                        float(pending_invoice.total_amount or 0)
+                        if pending_invoice is not None
+                        else 0.0
+                    ),
 
                     "active_alert_count": active_alert_count,
-                    "invoices": invoices,
 
-                    # Used directly by the frontend to determine whether the
-                    # parent firm deserves automatic attention/expansion.
-                    "requires_attention": (
-                        over_budget
-                        or threshold_reached
-                        or active_alert_count > 0
-                        or any(
-                            inv["is_newest_invoice"]
-                            for inv in invoices
-                        )
-                    ),
+                    "invoices": invoices,
                 }
             )
 
         if matters:
-            firm_requires_attention = any(
-                matter["requires_attention"]
-                for matter in matters
-            )
-
             result.append(
                 {
                     "firm_id": firm.firm_id,
                     "firm_name": firm.name,
                     "firm_address": firm.address,
-
                     "matters": matters,
-
-                    "requires_attention": (
-                        firm_requires_attention
-                    ),
                 }
             )
 
+    return result
+
+# def budget_hierarchy(db: Session, firm_id: int | None = None):
+    q = (
+        db.query(Firm)
+        .options(
+            joinedload(Firm.matters).joinedload(Matter.budget),
+            joinedload(Firm.matters).joinedload(Matter.invoices),
+        )
+        .order_by(Firm.name)
+    )
+    if firm_id is not None:
+        q = q.filter(Firm.firm_id == firm_id)
+
+    # Keep persisted alerts synchronized with the current ledger-backed budget state
+    # before returning the hierarchy. This also repairs older databases where an
+    # invoice-specific alert was dismissed during budget reconciliation but the
+    # matter remained above its configured threshold.
+    firms = q.all()
+    for firm in firms:
+        for matter in firm.matters:
+            if not matter.budget:
+                continue
+            _sync_budget_state_alert(
+                db,
+                budget=matter.budget,
+                matter=matter,
+                user_id=-1,
+            )
+    db.commit()
+
+    result = []
+    for firm in firms:
+        matters = []
+        for matter in firm.matters:
+            if not matter.budget:
+                continue
+            budget = matter.budget
+            used = budget_usage(db, budget)
+            allocated = float(budget.allocated_amt or 0)
+            pct = (used / allocated * 100) if allocated else 0.0
+            invoices = []
+            for invoice in sorted(matter.invoices, key=lambda x: x.invoice_id, reverse=True):
+                current = _current_invoice_budget_result(db, invoice, budget)
+                invoices.append(
+                    {
+                        "invoice_id": invoice.invoice_id,
+                        "invoice_no": invoice.invoice_no,
+                        "amount": float(invoice.total_amount or 0),
+                        "status": invoice.status,
+                        "budget_result": current["budget_result"],
+                        "remaining_after_invoice": current["remaining_after_invoice"],
+                        "projected_utilization": current["projected_utilization"],
+                        "needs_attention": current["needs_attention"],
+                        "intake_budget_result": invoice.budget_status_at_intake,
+                        "intake_remaining_after_invoice": (
+                            float(invoice.budget_remaining_after_invoice)
+                            if invoice.budget_remaining_after_invoice is not None
+                            else None
+                        ),
+                        "validation_message": invoice.validation_message,
+                    }
+                )
+
+            active_alert_count = (
+                db.query(Alert)
+                .filter(Alert.budget_id == budget.budget_id, Alert.is_active.is_(True))
+                .count()
+            )
+            matters.append(
+                {
+                    "matter_id": matter.matter_id,
+                    "matter_no": matter.matter_no,
+                    "matter_name": matter.name,
+                    "budget_id": budget.budget_id,
+                    "allocated": allocated,
+                    "utilized": used,
+                    "remaining": allocated - used,
+                    "pct_used": pct,
+                    "threshold_pct": float(budget.threshold_pct or 0),
+                    "threshold_reached": pct >= float(budget.threshold_pct or 0),
+                    "over_budget": pct > 100,
+                    "active_alert_count": active_alert_count,
+                    "invoices": invoices,
+                }
+            )
+        if matters:
+            result.append(
+                {
+                    "firm_id": firm.firm_id,
+                    "firm_name": firm.name,
+                    "firm_address": firm.address,
+                    "matters": matters,
+                }
+            )
     return result

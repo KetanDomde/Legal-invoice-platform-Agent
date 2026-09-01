@@ -34,3 +34,9 @@ class AuditLogRead(AuditLogCreate):
     confirmed: bool | None = None
 
     model_config = {"from_attributes": True}
+
+class AuditLogPage(BaseModel):
+    items: list[AuditLogRead]
+    total: int
+    offset: int
+    limit: int

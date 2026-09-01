@@ -269,6 +269,42 @@ class APIClient:
         if limit:
             params["limit"] = limit
         return self._call("GET", "/audit-logs/", params=params or None)
+    def list_audit_logs_page(
+        self,
+        *,
+        invoice_no=None,
+        firm_name=None,
+        matter_no=None,
+        matter_name=None,
+        request_id=None,
+        action=None,
+        user_name=None,
+        general=None,
+        start_date=None,
+        end_date=None,
+        offset=0,
+        limit=25,
+    ):
+        params = {
+            "invoice_no": invoice_no or None,
+            "firm_name": firm_name or None,
+            "matter_no": matter_no or None,
+            "matter_name": matter_name or None,
+            "request_id": request_id or None,
+            "action": action or None,
+            "user_name": user_name or None,
+            "general": general or None,
+            "start_date": start_date.isoformat() if hasattr(start_date, "isoformat") else start_date,
+            "end_date": end_date.isoformat() if hasattr(end_date, "isoformat") else end_date,
+            "offset": offset,
+            "limit": limit,
+        }
+        return self._call(
+            "GET",
+            "/audit-logs/page",
+            params={k: v for k, v in params.items() if v is not None},
+        )
+
     def dismiss_alert(self, alert_id: int):
         """
         Dismiss an alert without deleting its database record.

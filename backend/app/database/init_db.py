@@ -27,6 +27,11 @@ def _sqlite_additive_migration() -> None:
             "normalized_address": "TEXT",
         },
         "matters": {"matter_no": "VARCHAR(50)"},
+        "line_items": {
+            "line_type": "VARCHAR(20) NOT NULL DEFAULT 'fee'",
+            "role": "VARCHAR(255)",
+            "description": "TEXT",
+        },
         "invoices": {
             "billing_period_start": "DATE",
             "billing_period_end": "DATE",
@@ -67,6 +72,34 @@ def _sqlite_additive_migration() -> None:
             for name, sql_type in columns.items():
                 if name not in existing:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}"))
+
+        # Legacy line-item backfill:
+        # Before line_type existed, expense rows were stored as rows with no
+        # timekeeper, hours or rate. Adding line_type with DEFAULT 'fee' kept
+        # those rows intact but incorrectly labelled them as fees. Reclassify
+        # only that unmistakable legacy shape; real fee rows with any billing
+        # identity remain fees. This is idempotent and safe to run on startup.
+        if "line_items" in inspector.get_table_names():
+            conn.execute(text("""
+                UPDATE line_items
+                SET line_type = 'expense'
+                WHERE
+                    (line_type IS NULL OR LOWER(TRIM(line_type)) != 'expense')
+                    AND (timekeeper IS NULL OR TRIM(timekeeper) = '')
+                    AND hours IS NULL
+                    AND rate IS NULL
+            """))
+            conn.execute(text("""
+                UPDATE line_items
+                SET line_type = 'fee'
+                WHERE line_type IS NULL OR TRIM(line_type) = ''
+            """))
+            conn.execute(text("""
+                UPDATE line_items
+                SET description = 'Legacy expense'
+                WHERE line_type = 'expense'
+                  AND (description IS NULL OR TRIM(description) = '')
+            """))
 
 
 def _backfill_normalized_firms(db) -> None:

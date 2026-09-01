@@ -31,9 +31,22 @@ class InvoiceUpdate(BaseModel):
 class InvoiceRead(InvoiceCreate):
     invoice_id:int; budget_valid:bool|None=None; duplicate_flag:bool=False; validation_status:str|None=None; validation_message:str|None=None; budget_status_at_intake:str|None=None; budget_attention_required:bool=False; model_config={"from_attributes":True}
 class LineItemCreate(BaseModel):
-    invoice_id:int; timekeeper:str|None=None; hours:float|None=Field(default=None,ge=0); rate:float|None=Field(default=None,ge=0); amount:float=Field(gt=0)
+    invoice_id: int
+    line_type: str = "fee"
+    timekeeper: str | None = None
+    role: str | None = None
+    description: str | None = None
+    hours: float | None = Field(default=None, ge=0)
+    rate: float | None = Field(default=None, ge=0)
+    amount: float = Field(gt=0)
 class LineItemUpdate(BaseModel):
-    timekeeper:str|None=None; hours:float|None=Field(default=None,ge=0); rate:float|None=Field(default=None,ge=0); amount:float|None=Field(default=None,gt=0)
+    line_type: str | None = None
+    timekeeper: str | None = None
+    role: str | None = None
+    description: str | None = None
+    hours: float | None = Field(default=None, ge=0)
+    rate: float | None = Field(default=None, ge=0)
+    amount: float | None = Field(default=None, gt=0)
 class LineItemRead(LineItemCreate):
     line_item_id:int; model_config={"from_attributes":True}
 class BudgetLedgerCreate(BaseModel):

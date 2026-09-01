@@ -507,7 +507,6 @@ def delete_line_item(
     db.commit()
 
 
-
 # ---------------------------------------------------------------------------
 # Budget ledger and alerts
 # ---------------------------------------------------------------------------
@@ -521,41 +520,17 @@ def list_budget_ledger(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    query = (
-        db.query(BudgetLedger)
-        .join(BudgetLedger.budget)
-        .join(Budget.matter)
-    )
-
+    query = db.query(BudgetLedger).join(BudgetLedger.budget).join(Budget.matter)
     if current_user.firm_id is not None:
-        query = query.filter(
-            Matter.firm_id == current_user.firm_id
-        )
-
+        query = query.filter(Matter.firm_id == current_user.firm_id)
     if budget_id is not None:
-        query = query.filter(
-            BudgetLedger.budget_id == budget_id
-        )
-
+        query = query.filter(BudgetLedger.budget_id == budget_id)
     if invoice_id is not None:
-        query = query.filter(
-            BudgetLedger.invoice_id == invoice_id
-        )
-
-    return (
-        query
-        .order_by(BudgetLedger.ledger_id.desc())
-        .offset(offset)
-        .limit(limit)
-        .all()
-    )
+        query = query.filter(BudgetLedger.invoice_id == invoice_id)
+    return query.order_by(BudgetLedger.ledger_id.desc()).offset(offset).limit(limit).all()
 
 
-@router.post(
-    "/budget-ledger",
-    response_model=BudgetLedgerRead,
-    status_code=status.HTTP_201_CREATED,
-)
+@router.post("/budget-ledger", response_model=BudgetLedgerRead, status_code=status.HTTP_201_CREATED)
 def create_budget_ledger(
     request: BudgetLedgerCreate,
     db: Session = Depends(get_db),
@@ -563,111 +538,91 @@ def create_budget_ledger(
 ):
     budget = db.get(Budget, request.budget_id)
     invoice = db.get(Invoice, request.invoice_id)
-
     if budget is None or invoice is None:
-        raise HTTPException(
-            status_code=400,
-            detail="budget_id and invoice_id must exist",
-        )
-
-    _ensure_firm_access(
-        current_user,
-        budget.matter.firm_id,
-    )
-
+        raise HTTPException(status_code=400, detail="budget_id and invoice_id must exist")
+    _ensure_firm_access(current_user, budget.matter.firm_id)
     entry = BudgetLedger(**request.model_dump())
-
     db.add(entry)
     db.commit()
     db.refresh(entry)
-
     return entry
 
 
-# Build one consistent, user-friendly alert payload for every frontend page.
-# This keeps internal IDs available while exposing firm, matter and invoice context.
 def _serialize_alert(db: Session, alert: Alert) -> dict:
-    """
-    Convert an alert into user-friendly data.
+    """Return an alert with current, user-facing business context.
 
-    Internal IDs remain available for the frontend, but the UI can now show
-    business names instead of forcing users to understand database IDs.
-    """
+    The Alert table intentionally stores only the alert/budget/invoice IDs.
+    Frontend pages should not have to resolve database IDs themselves, so this
+    serializer supplies firm, matter, invoice and current budget information.
 
+    Utilization is calculated from the approved ledger.  If the alert is tied
+    to a pending invoice, the invoice is also included in the projection so an
+    over-budget/threshold alert shows the same projected utilization used by
+    the budget-management service.
+    """
     budget = db.get(Budget, alert.budget_id)
     matter = budget.matter if budget is not None else None
     firm = matter.firm if matter is not None else None
-
-    invoice = (
-        db.get(Invoice, alert.invoice_id)
-        if alert.invoice_id is not None
-        else None
-    )
+    invoice = db.get(Invoice, alert.invoice_id) if alert.invoice_id is not None else None
 
     allocated = float(budget.allocated_amt or 0) if budget else 0.0
+    threshold = float(budget.threshold_pct or 0) if budget else None
 
-    if budget and allocated > 0:
+    utilized = 0.0
+    if budget is not None:
         utilized = float(
-            db.query(BudgetLedger)
+            db.query(func.coalesce(func.sum(BudgetLedger.amount), 0))
             .filter(
                 BudgetLedger.budget_id == budget.budget_id,
                 BudgetLedger.entry_type == "invoice_approved",
-            )
-            .with_entities(
-                func.coalesce(
-                    func.sum(BudgetLedger.amount),
-                    0,
-                )
             )
             .scalar()
             or 0
         )
 
-        utilization_pct = (
-            utilized / allocated * 100
-            if allocated > 0
-            else 0.0
-        )
-    else:
-        utilized = 0.0
-        utilization_pct = 0.0
+    invoice_is_pending = (
+        invoice is not None
+        and str(invoice.status).lower() == "pending_review"
+    )
+
+    projected_spend = utilized
+    if invoice_is_pending:
+        projected_spend += float(invoice.total_amount or 0)
+
+    utilization_pct = (
+        projected_spend / allocated * 100
+        if allocated > 0
+        else 0.0
+    )
+    remaining = allocated - projected_spend
 
     return {
         "alert_id": alert.alert_id,
         "budget_id": alert.budget_id,
         "invoice_id": alert.invoice_id,
         "type": alert.type,
+        "alert_type": alert.type,
         "message": alert.message,
         "is_active": alert.is_active,
         "created_at": alert.created_at,
         "resolved_at": alert.resolved_at,
-
-        # User-friendly firm information
         "firm_id": firm.firm_id if firm else None,
         "firm_name": firm.name if firm else None,
         "firm_address": firm.address if firm else None,
-
-        # User-friendly matter information
         "matter_id": matter.matter_id if matter else None,
         "matter_no": matter.matter_no if matter else None,
         "matter_name": matter.name if matter else None,
-
-        # User-friendly invoice information
         "invoice_no": invoice.invoice_no if invoice else None,
         "invoice_status": invoice.status if invoice else None,
-        "invoice_amount": (
-            float(invoice.total_amount or 0)
-            if invoice else None
-        ),
-
-        # Current budget position
+        "invoice_amount": float(invoice.total_amount or 0) if invoice else None,
         "allocated": allocated,
         "utilized": utilized,
+        "projected_spend": projected_spend,
+        "remaining": remaining,
+        "remaining_after_invoice": remaining,
         "utilization_pct": utilization_pct,
-        "threshold_pct": (
-            float(budget.threshold_pct or 0)
-            if budget else None
-        ),
+        "projected_utilization": utilization_pct,
+        "threshold_pct": threshold,
     }
 
 
@@ -680,80 +635,38 @@ def list_alerts(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """
-    Return alerts enriched with firm, matter, invoice and budget information.
-    """
-
-    query = (
-        db.query(Alert)
-        .join(Alert.budget)
-        .join(Budget.matter)
-    )
-
+    """Return alerts enriched with current firm/matter/invoice context."""
+    query = db.query(Alert).join(Alert.budget).join(Budget.matter)
     if current_user.firm_id is not None:
-        query = query.filter(
-            Matter.firm_id == current_user.firm_id
-        )
-
+        query = query.filter(Matter.firm_id == current_user.firm_id)
     if budget_id is not None:
-        query = query.filter(
-            Alert.budget_id == budget_id
-        )
-
+        query = query.filter(Alert.budget_id == budget_id)
     if active_only:
-        query = query.filter(
-            Alert.is_active.is_(True)
-        )
+        query = query.filter(Alert.is_active.is_(True))
 
     alerts = (
-        query
-        .order_by(Alert.alert_id.desc())
-        .offset(offset)
-        .limit(limit)
+        query.order_by(Alert.alert_id.desc())
+        .offset(max(offset, 0))
+        .limit(max(1, min(limit, 500)))
         .all()
     )
-
-    return [
-        _serialize_alert(db, alert)
-        for alert in alerts
-    ]
+    return [_serialize_alert(db, alert) for alert in alerts]
 
 
-@router.post(
-    "/alerts",
-    response_model=AlertRead,
-    status_code=status.HTTP_201_CREATED,
-)
+@router.post("/alerts", response_model=AlertRead, status_code=status.HTTP_201_CREATED)
 def create_alert(
     request: AlertCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([ADMIN, EDITOR])),
 ):
     budget = db.get(Budget, request.budget_id)
-
     if budget is None:
-        raise HTTPException(
-            status_code=400,
-            detail="budget_id does not exist",
-        )
-
-    _ensure_firm_access(
-        current_user,
-        budget.matter.firm_id,
-    )
-
+        raise HTTPException(status_code=400, detail="budget_id does not exist")
+    _ensure_firm_access(current_user, budget.matter.firm_id)
     if request.invoice_id is not None:
-        invoice = db.get(
-            Invoice,
-            request.invoice_id,
-        )
-
+        invoice = db.get(Invoice, request.invoice_id)
         if invoice is None:
-            raise HTTPException(
-                status_code=400,
-                detail="invoice_id does not exist",
-            )
-
+            raise HTTPException(status_code=400, detail="invoice_id does not exist")
         if invoice.matter_id != budget.matter_id:
             raise HTTPException(
                 status_code=422,
@@ -761,11 +674,9 @@ def create_alert(
             )
 
     alert = Alert(**request.model_dump())
-
     db.add(alert)
     db.commit()
     db.refresh(alert)
-
     return alert
 
 
@@ -775,38 +686,20 @@ def dismiss_alert(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([ADMIN, EDITOR])),
 ):
-    """
-    Dismiss an alert without deleting it.
-
-    The database row remains for history/audit purposes.
-    Only the active flag is turned off.
-    """
-
+    """Dismiss an alert without deleting its database history."""
     alert = db.get(Alert, alert_id)
-
     if alert is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Alert not found",
-        )
+        raise HTTPException(status_code=404, detail="Alert not found")
 
     budget = db.get(Budget, alert.budget_id)
-
     if budget is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Budget associated with this alert was not found",
-        )
+        raise HTTPException(status_code=404, detail="Budget associated with this alert was not found")
 
-    _ensure_firm_access(
-        current_user,
-        budget.matter.firm_id,
-    )
+    _ensure_firm_access(current_user, budget.matter.firm_id)
 
     if alert.is_active:
         alert.is_active = False
         alert.resolved_at = datetime.now(timezone.utc)
-
         db.commit()
         db.refresh(alert)
 
@@ -901,12 +794,9 @@ def create_budget_adjustment(
         db.rollback()
         raise HTTPException(status_code=422, detail=str(exc))
 
-    related_invoice = db.get(Invoice, row.invoice_id) if row.invoice_id is not None else None
-
     return {
         "adjustment_id": row.adjustment_id,
         "invoice_id": row.invoice_id,
-        "invoice_no": related_invoice.invoice_no if related_invoice else None,
         "previous_amount": float(row.previous_amount),
         "adjustment_amount": float(row.adjustment_amount),
         "new_amount": float(row.new_amount),

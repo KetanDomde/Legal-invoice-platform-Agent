@@ -252,7 +252,10 @@ def _serialize_invoice(invoice: Invoice) -> dict:
         "line_items": [
             {
                 "line_item_id": li.line_item_id,
+                "line_type": getattr(li, "line_type", "expense" if not li.timekeeper else "fee"),
                 "timekeeper": li.timekeeper,
+                "role": getattr(li, "role", None),
+                "description": getattr(li, "description", None),
                 "hours": li.hours,
                 "rate": li.rate,
                 "amount": li.amount,

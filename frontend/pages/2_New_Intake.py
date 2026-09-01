@@ -27,7 +27,7 @@ page_header(
     2,
     "New Intake & Extraction",
     "Submit an invoice PDF to the real extraction/validation pipeline and see exactly what came back — "
-    "extracted fields, confidence, duplicate check, and the full audit trail for this submission.",
+    "extracted fields, confidence, duplicate check, and classified charges.",
 )
 
 client = get_client()
@@ -253,18 +253,71 @@ if result:
                 ),
             )
 
-            st.markdown("#### Line Items")
-
             line_items = extracted.get("line_items") or []
 
-            if line_items:
+            def _amount(item):
+                try:
+                    return float(item.get("amount") or 0)
+                except (TypeError, ValueError):
+                    return 0.0
+
+            def _line_type(item):
+                # Keep legacy rows safe: rows without a timekeeper/hours/rate are
+                # expenses even when an older database defaulted line_type to fee.
+                value = str(item.get("line_type") or "").strip().lower()
+                has_timekeeper = bool(str(item.get("timekeeper") or "").strip())
+                has_hours = item.get("hours") is not None
+                has_rate = item.get("rate") is not None
+                if value == "expense":
+                    return "expense"
+                if not has_timekeeper and not has_hours and not has_rate:
+                    return "expense"
+                return "fee"
+
+            fee_items = [item for item in line_items if _line_type(item) == "fee"]
+            expense_items = [item for item in line_items if _line_type(item) == "expense"]
+            professional_fees = sum(_amount(item) for item in fee_items)
+            expenses_total = sum(_amount(item) for item in expense_items)
+            classified_total = professional_fees + expenses_total
+
+            st.markdown("#### Invoice Charges")
+            st.markdown("##### 👨‍⚖️ Timekeeper Charges")
+            if fee_items:
                 st.dataframe(
-                    line_items,
+                    [
+                        {
+                            "Timekeeper": item.get("timekeeper") or "—",
+                            "Role": item.get("role") or "—",
+                            "Hours": item.get("hours") if item.get("hours") is not None else "—",
+                            "Rate": f"${float(item['rate']):,.2f}" if item.get("rate") is not None else "—",
+                            "Amount": f"${_amount(item):,.2f}",
+                        }
+                        for item in fee_items
+                    ],
                     use_container_width=True,
                     hide_index=True,
                 )
             else:
-                st.caption("No line items extracted.")
+                st.caption("No timekeeper charges extracted.")
+            st.caption(f"Professional fees subtotal: ${professional_fees:,.2f}")
+
+            st.markdown("##### 📎 Expenses")
+            if expense_items:
+                st.dataframe(
+                    [
+                        {
+                            "Description": item.get("description") or "Expense",
+                            "Amount": f"${_amount(item):,.2f}",
+                        }
+                        for item in expense_items
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.caption("No expenses extracted.")
+            st.caption(f"Expenses subtotal: ${expenses_total:,.2f}")
+            st.markdown(f"**Classified charges total: ${classified_total:,.2f}**")
 
     with right:
         with st.container(border=True):
@@ -295,12 +348,6 @@ if result:
                     "needs a human decision.",
                     success=True,
                 )
-
-    with st.container(border=True):
-        st.markdown("#### Audit Trail for This Submission")
-
-        for line in result.get("audit_trail") or []:
-            st.text(line)
 
     if st.button(
         "Open in Invoice Workspace →",

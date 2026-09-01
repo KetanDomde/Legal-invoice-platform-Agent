@@ -25,21 +25,23 @@ except APIError as e:
 
 matter = matters.get(invoice["matter_id"], {})
 
-page_header(3, "Invoice Workspace / Invoice Detail",
-            "Central invoice view — status, line items, artifacts, and audit trail, all live from the database.",
-            extra_badge=status_badge(invoice["status"]))
+page_header(
+    3,
+    "Invoice Workspace / Invoice Detail",
+    "Central invoice view — status, professional fees, expenses, artifacts, and validation details, all live from the database.",
+    extra_badge=status_badge(invoice["status"]),
+)
 
 TIMELINE_STEPS = ["Submitted", "Extracted & Validated", "Under Review", "Decision"]
 
 
 def _step_state(idx: int, status: str):
-    order = ["submitted", "pending_review", "under_review", "clarification_requested", "approved", "rejected"]
     if status in ("approved", "rejected"):
         reached = 4
     elif status in ("under_review", "pending_review", "clarification_requested"):
         reached = 3
     else:
-        reached = 2  # any recorded status beyond raw "submitted" means extraction ran
+        reached = 2
     if status == "submitted":
         reached = 1
 
@@ -50,6 +52,39 @@ def _step_state(idx: int, status: str):
     return "pending"
 
 
+def _amount(item):
+    try:
+        return float(item.get("amount") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _line_type(item):
+    """Classify both new typed rows and legacy rows safely.
+
+    Older databases gained line_type with DEFAULT 'fee', so blank expense rows
+    can already carry the misleading value 'fee'. The row shape is authoritative
+    for that legacy case: a row with no timekeeper, hours, or rate is an expense.
+    """
+    value = str(item.get("line_type") or "").strip().lower()
+    has_timekeeper = bool(str(item.get("timekeeper") or "").strip())
+    has_hours = item.get("hours") is not None
+    has_rate = item.get("rate") is not None
+
+    if value == "expense":
+        return "expense"
+    if not has_timekeeper and not has_hours and not has_rate:
+        return "expense"
+    return "fee"
+
+
+fee_items = [item for item in line_items if _line_type(item) == "fee"]
+expense_items = [item for item in line_items if _line_type(item) == "expense"]
+professional_fees = sum(_amount(item) for item in fee_items)
+expenses_total = sum(_amount(item) for item in expense_items)
+classified_total = professional_fees + expenses_total
+invoice_total = float(invoice.get("total_amount") or 0)
+
 left, right = st.columns([2, 1])
 
 with left:
@@ -59,18 +94,55 @@ with left:
         kv_row("Invoice No.", invoice.get("invoice_no") or "—")
         kv_row("Matter", matter.get("name", f"Matter {invoice['matter_id']}"))
         kv_row("Invoice Date", invoice.get("invoice_date") or "—")
-        kv_row("Total Amount", f"${invoice['total_amount']:,.2f}" if invoice.get("total_amount") is not None else "—")
+        kv_row("Total Amount", f"${invoice_total:,.2f}")
         kv_row("Current Status", status_badge(invoice["status"]))
 
-        st.markdown("#### Line Items")
-        if line_items:
+        st.markdown("#### Invoice Charges")
+
+        st.markdown("##### 👨‍⚖️ Timekeeper Charges")
+        if fee_items:
             st.dataframe(
-                [{"Timekeeper": li.get("timekeeper") or "—", "Hours": li.get("hours"), "Rate": li.get("rate"),
-                  "Amount": f"${li['amount']:,.2f}"} for li in line_items],
-                use_container_width=True, hide_index=True,
+                [
+                    {
+                        "Timekeeper": item.get("timekeeper") or "—",
+                        "Role": item.get("role") or "—",
+                        "Hours": item.get("hours") if item.get("hours") is not None else "—",
+                        "Rate": f"${float(item['rate']):,.2f}" if item.get("rate") is not None else "—",
+                        "Amount": f"${_amount(item):,.2f}",
+                    }
+                    for item in fee_items
+                ],
+                use_container_width=True,
+                hide_index=True,
             )
         else:
-            st.caption("No line items recorded.")
+            st.caption("No timekeeper charges recorded.")
+        st.caption(f"Professional fees subtotal: ${professional_fees:,.2f}")
+
+        st.markdown("##### 📎 Expenses")
+        if expense_items:
+            st.dataframe(
+                [
+                    {
+                        "Description": item.get("description") or "Expense",
+                        "Amount": f"${_amount(item):,.2f}",
+                    }
+                    for item in expense_items
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.caption("No expenses recorded.")
+        st.caption(f"Expenses subtotal: ${expenses_total:,.2f}")
+
+        st.markdown(f"**Classified charges total: ${classified_total:,.2f}**")
+        st.markdown(f"**Total invoice amount: ${invoice_total:,.2f}**")
+        if line_items and abs(classified_total - invoice_total) > 0.01:
+            st.warning(
+                "The extracted charge lines do not add up to the invoice total. "
+                "The invoice total remains authoritative for budget calculations."
+            )
 
         st.markdown("#### Status Timeline")
         timeline([(label, _step_state(i, invoice["status"])) for i, label in enumerate(TIMELINE_STEPS)])
@@ -79,7 +151,7 @@ with right:
     with st.container(border=True):
         st.markdown("#### Artifacts")
         st.markdown(f"- Extracted Fields &nbsp;{status_badge('approved') if invoice.get('invoice_no') else status_badge('submitted')}", unsafe_allow_html=True)
-        st.markdown(f"- Line Items ({len(line_items)}) &nbsp;{status_badge('approved') if line_items else status_badge('submitted')}", unsafe_allow_html=True)
+        st.markdown(f"- Charge Lines ({len(line_items)}) &nbsp;{status_badge('approved') if line_items else status_badge('submitted')}", unsafe_allow_html=True)
         st.markdown(f"- Validation Result &nbsp;{status_badge(invoice['validation_status']) if invoice.get('validation_status') else status_badge('submitted')}", unsafe_allow_html=True)
 
         st.markdown("#### Quick Actions")
@@ -102,21 +174,3 @@ with right:
                         st.rerun()
                     except APIError as e:
                         st.error(e.detail)
-
-st.markdown("#### Audit Trail")
-try:
-    logs = client.list_audit_logs(invoice_id=invoice["invoice_id"])
-except APIError as e:
-    logs = []
-    st.error(f"Couldn't load audit trail: {e.detail}")
-
-if logs:
-    import pandas as pd
-    df = pd.DataFrame(logs).sort_values("created_at", ascending=False)
-    st.dataframe(
-        df.rename(columns={"audit_id": "ID", "user_id": "User", "action": "Action", "notes": "Notes", "created_at": "When"})
-          [["ID", "User", "Action", "Notes", "When"]],
-        use_container_width=True, hide_index=True,
-    )
-else:
-    st.caption("No audit events for this invoice yet.")

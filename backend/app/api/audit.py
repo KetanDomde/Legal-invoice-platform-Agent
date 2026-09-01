@@ -1,13 +1,14 @@
-from datetime import datetime
+from datetime import date, datetime, timedelta
 import re
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session, joinedload
 
 from app.auth.security import ADMIN, EDITOR, require_role
 from app.database.database import get_db
 from app.models import AuditLog, Firm, Invoice, Matter, User
-from app.schemas.audit import AuditLogRead
+from app.schemas.audit import AuditLogPage, AuditLogRead
 
 
 router = APIRouter(prefix="/audit-logs", tags=["Audit Logs"])
@@ -177,6 +178,106 @@ def list_audit_logs(
 
     rows = query.order_by(AuditLog.audit_id.desc()).limit(limit).all()
     return [_serialize_log(db, row) for row in rows]
+
+
+@router.get("/page", response_model=AuditLogPage)
+def list_audit_logs_page(
+    invoice_no: str | None = None,
+    firm_name: str | None = None,
+    matter_no: str | None = None,
+    matter_name: str | None = None,
+    request_id: str | None = None,
+    action: str | None = None,
+    user_name: str | None = None,
+    general: str | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    offset: int = 0,
+    limit: int = 25,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([ADMIN, EDITOR])),
+):
+    """Paginated audit history with business-friendly filters.
+
+    This is additive: the legacy list endpoint remains unchanged for existing
+    callers. Results are always newest first so page 1 is the latest activity.
+    """
+    limit = max(1, min(limit, 100))
+    offset = max(0, offset)
+
+    query = (
+        db.query(AuditLog)
+        .options(joinedload(AuditLog.user))
+        .outerjoin(Invoice, AuditLog.invoice_id == Invoice.invoice_id)
+        .outerjoin(
+            Firm,
+            or_(
+                AuditLog.firm_id == Firm.firm_id,
+                and_(AuditLog.firm_id.is_(None), Invoice.firm_id == Firm.firm_id),
+            ),
+        )
+        .outerjoin(
+            Matter,
+            or_(
+                AuditLog.matter_id == Matter.matter_id,
+                and_(AuditLog.matter_id.is_(None), Invoice.matter_id == Matter.matter_id),
+            ),
+        )
+        .outerjoin(User, AuditLog.user_id == User.user_id)
+    )
+
+    if invoice_no:
+        query = query.filter(Invoice.invoice_no.ilike(f"%{invoice_no.strip()}%"))
+    if firm_name:
+        query = query.filter(Firm.name.ilike(f"%{firm_name.strip()}%"))
+    if matter_no:
+        query = query.filter(Matter.matter_no.ilike(f"%{matter_no.strip()}%"))
+    if matter_name:
+        query = query.filter(Matter.name.ilike(f"%{matter_name.strip()}%"))
+    if request_id:
+        query = query.filter(AuditLog.request_id.ilike(f"%{request_id.strip()}%"))
+    if action:
+        query = query.filter(AuditLog.action == action)
+    if user_name:
+        if user_name == "System":
+            query = query.filter(AuditLog.user_id == -1)
+        else:
+            query = query.filter(User.name == user_name)
+    if start_date:
+        query = query.filter(AuditLog.created_at >= datetime.combine(start_date, datetime.min.time()))
+    if end_date:
+        query = query.filter(
+            AuditLog.created_at < datetime.combine(end_date + timedelta(days=1), datetime.min.time())
+        )
+    if general:
+        term = f"%{general.strip()}%"
+        query = query.filter(or_(
+            AuditLog.action.ilike(term),
+            AuditLog.notes.ilike(term),
+            AuditLog.request_id.ilike(term),
+            Invoice.invoice_no.ilike(term),
+            Firm.name.ilike(term),
+            Matter.matter_no.ilike(term),
+            Matter.name.ilike(term),
+            User.name.ilike(term),
+        ))
+
+    if current_user.firm_id is not None:
+        query = query.filter(Firm.firm_id == current_user.firm_id)
+
+    total = query.order_by(None).count()
+    rows = (
+        query.order_by(AuditLog.created_at.desc(), AuditLog.audit_id.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    return {
+        "items": [_serialize_log(db, row) for row in rows],
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+    }
 
 
 @router.get("/{log_id}", response_model=AuditLogRead)

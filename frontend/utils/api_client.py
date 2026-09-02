@@ -9,6 +9,7 @@ import requests
 import streamlit as st
 import uuid
 
+
 DEFAULT_BASE_URL = "http://localhost:8000"
 
 
@@ -322,14 +323,27 @@ class APIClient:
         )
 
     def dismiss_alert(self, alert_id: int):
-        """
-        Dismiss an alert without deleting its database record.
+        """Dismiss an alert without deleting its database record."""
+        return self._call("POST", f"/alerts/{alert_id}/dismiss")
+
 
     # --- validation ------------------------------------------------------------
-    def validate_invoice(self, invoice_id, budget_valid=None, duplicate_flag=False, confidence_score=None):
-        return self._call("POST", f"/validation/{invoice_id}", params={
-            "budget_valid": budget_valid, "duplicate_flag": duplicate_flag, "confidence_score": confidence_score})
-
+    def validate_invoice(
+        self,
+        invoice_id,
+        budget_valid=None,
+        duplicate_flag=False,
+        confidence_score=None,
+    ):
+        return self._call(
+            "POST",
+            f"/validation/{invoice_id}",
+            params={
+                "budget_valid": budget_valid,
+                "duplicate_flag": duplicate_flag,
+                "confidence_score": confidence_score,
+            },
+        )
 
 
 def get_client() -> APIClient:
@@ -346,11 +360,9 @@ def _handle_session_expired():
 
 
 def require_login():
-    """Call at the top of every page except Home. Redirects to Home (the
-    login form) if not logged in, instead of stopping mid-page."""
+    """Redirect to Home if the user is not logged in."""
     if not st.session_state.get("token") or not st.session_state.get("user"):
         st.switch_page("Home.py")
-
 
 def require_role(*roles):
     require_login()
